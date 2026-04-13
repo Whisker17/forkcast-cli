@@ -98,6 +98,7 @@ export interface OutputForkChampion extends Omit<ForkChampion, "discord" | "emai
 
 export interface OutputPresentationHistoryEntry {
   type: string;
+  // Exactly one of call/link is non-null in normalized output.
   call: string | null;
   date: string;
   link: string | null;

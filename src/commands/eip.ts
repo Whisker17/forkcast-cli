@@ -81,6 +81,7 @@ function normalizeForkStatusHistoryEntry(
 ): OutputForkStatusHistoryEntry {
   return {
     status: entry.status,
+    // Upstream JSON is not schema-validated at runtime, so keep these defensive.
     call: entry.call ?? null,
     date: entry.date ?? null,
     timestamp: entry.timestamp ?? null,
@@ -107,11 +108,17 @@ function normalizeForkRelationship(relationship: Eip["forkRelationships"][number
   };
 }
 
-function normalizeEipForOutput(eip: Eip): OutputEip {
+export function normalizeEipForOutput(eip: Eip): OutputEip {
   return {
-    ...eip,
+    id: eip.id,
+    title: eip.title,
+    status: eip.status,
+    description: eip.description,
+    author: eip.author,
+    type: eip.type,
     benefits: eip.benefits ?? null,
     category: eip.category ?? null,
+    createdDate: eip.createdDate,
     discussionLink: eip.discussionLink ?? null,
     forkRelationships: eip.forkRelationships.map(normalizeForkRelationship),
     layer: eip.layer ?? null,
@@ -273,7 +280,7 @@ function getCommandErrorCode(error: unknown): ErrorCode {
 
 async function handleEipCommand(
   eipNumberArg: string,
-  options: { context?: boolean; pretty?: boolean },
+  _options: { context?: boolean; pretty?: boolean },
   command: Command,
   deps: EipCommandDependencies,
 ) {
@@ -313,7 +320,7 @@ export function createEipCommand(
     .argument("<number>", "EIP number")
     .option("--context", "Include related meeting mentions")
     .option("--pretty", "Human-readable output instead of JSON")
-    .action((eipNumberArg, options, command) => handleEipCommand(eipNumberArg, options, command, deps));
+    .action((eipNumberArg, _options, command) => handleEipCommand(eipNumberArg, _options, command, deps));
 }
 
 export const eipCommand = createEipCommand();

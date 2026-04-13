@@ -56,6 +56,10 @@ function assertNoUndefinedDeep(value, seen = new Set()) {
   }
 }
 
+async function importEipModule() {
+  return import(`${pathToFileURL(path.join(rootDir, "dist", "commands", "eip.js")).href}?t=${Date.now()}`);
+}
+
 function runForkcast(args, { cacheRoot, env } = {}) {
   return spawnSync("./bin/forkcast", args, {
     cwd: rootDir,
@@ -446,7 +450,16 @@ test("WHI-60 normalizes missing optional EIP fields to null in JSON output", () 
     assert.equal(outputEip.stakeholderImpacts, null);
     assert.equal(outputEip.benefits, null);
     assert.equal(outputEip.tradeoffs, null);
-    assertNoUndefinedDeep(outputEip);
+    assert.ok("category" in outputEip);
+    assert.ok("discussionLink" in outputEip);
+    assert.ok("reviewer" in outputEip);
+    assert.ok("layer" in outputEip);
+    assert.ok("laymanDescription" in outputEip);
+    assert.ok("northStars" in outputEip);
+    assert.ok("northStarAlignment" in outputEip);
+    assert.ok("stakeholderImpacts" in outputEip);
+    assert.ok("benefits" in outputEip);
+    assert.ok("tradeoffs" in outputEip);
   } finally {
     fs.rmSync(cacheRoot, { force: true, recursive: true });
   }
@@ -460,28 +473,33 @@ test("WHI-60 normalizes nested fork relationship sparse fields to null", () => {
   );
 
   const cacheRoot = createCacheRoot();
-  const sparseEip = readFixtureJson("reference-eip-7702.json");
+  const sparseEip = readFixtureJson("reference-eip-8037.json");
 
   delete sparseEip.forkRelationships[0].champions;
-  delete sparseEip.forkRelationships[0].isHeadliner;
-  delete sparseEip.forkRelationships[0].wasHeadlinerCandidate;
-  delete sparseEip.forkRelationships[0].presentationHistory;
-  delete sparseEip.forkRelationships[0].statusHistory[0].timestamp;
+  delete sparseEip.forkRelationships[0].statusHistory[1].timestamp;
 
   try {
-    seedRawCache(cacheRoot, { eips: [sparseEip] });
+    seedRawCache(cacheRoot, {
+      eips: [sparseEip],
+    });
 
-    const result = runForkcast(["eip", "7702"], { cacheRoot });
+    const result = runForkcast(["eip", "8037"], { cacheRoot });
     const outputEip = JSON.parse(result.stdout).results[0];
 
     assert.equal(result.status, 0, `stdout:\n${result.stdout}\nstderr:\n${result.stderr}`);
     assert.deepEqual(outputEip.forkRelationships[0], {
-      forkName: "Pectra",
+      forkName: "Glamsterdam",
       statusHistory: [
         {
-          status: "Included",
+          status: "Proposed",
           call: null,
           date: null,
+          timestamp: null,
+        },
+        {
+          status: "Considered",
+          call: "acdt/66",
+          date: "2026-01-19",
           timestamp: null,
         },
       ],
@@ -490,10 +508,164 @@ test("WHI-60 normalizes nested fork relationship sparse fields to null", () => {
       wasHeadlinerCandidate: null,
       presentationHistory: null,
     });
-    assertNoUndefinedDeep(outputEip);
+    assert.ok("champions" in outputEip.forkRelationships[0]);
+    assert.ok("isHeadliner" in outputEip.forkRelationships[0]);
+    assert.ok("wasHeadlinerCandidate" in outputEip.forkRelationships[0]);
+    assert.ok("presentationHistory" in outputEip.forkRelationships[0]);
   } finally {
     fs.rmSync(cacheRoot, { force: true, recursive: true });
   }
+});
+
+test("WHI-60 normalizeEipForOutput strips unknown fields and preserves populated values", async () => {
+  assert.equal(
+    build.status,
+    0,
+    `expected build to succeed\nstdout:\n${build.stdout}\nstderr:\n${build.stderr}`,
+  );
+
+  const { normalizeEipForOutput } = await importEipModule();
+  const populatedEip = readFixtureJson("reference-eip-8037.json");
+
+  populatedEip.securityConsiderations = "Synthetic field to catch spread leakage";
+  populatedEip.forkRelationships[0].isHeadliner = true;
+  populatedEip.forkRelationships[0].wasHeadlinerCandidate = false;
+  populatedEip.forkRelationships[0].presentationHistory = [
+    {
+      type: "call",
+      call: "acdt/66",
+      date: "2026-01-19",
+    },
+  ];
+
+  const normalized = normalizeEipForOutput(populatedEip);
+
+  assertNoUndefinedDeep(normalized);
+  assert.equal("securityConsiderations" in normalized, false);
+  assert.deepEqual(normalized, {
+    id: 8037,
+    title: "EIP-8037: State Creation Gas Cost Increase",
+    status: "Draft",
+    description: "Harmonization, increase and separate metering of state creation gas costs to mitigate state growth and unblock scaling",
+    author: "Maria Silva (@misilva73), Carlos Perez (@CPerezz), Jochem Brouwer (@jochem-brouwer), Ansgar Dietrichs (@adietrichs), Łukasz Rozmej (@LukaszRozmej), Anders Elowsson (@anderselowsson), Francesco D'Amato (@fradamt)",
+    type: "Standards Track",
+    category: "Core",
+    createdDate: "2025-10-01",
+    discussionLink: "https://ethereum-magicians.org/t/eip-8037-state-creation-gas-cost-increase/25694",
+    reviewer: "expert",
+    layer: "EL",
+    forkRelationships: [
+      {
+        forkName: "Glamsterdam",
+        statusHistory: [
+          {
+            status: "Proposed",
+            call: null,
+            date: null,
+            timestamp: null,
+          },
+          {
+            status: "Considered",
+            call: "acdt/66",
+            date: "2026-01-19",
+            timestamp: 3188,
+          },
+        ],
+        champions: [
+          {
+            name: "Maria Silva",
+            discord: "misilva73",
+            email: null,
+            telegram: null,
+          },
+        ],
+        isHeadliner: true,
+        wasHeadlinerCandidate: false,
+        presentationHistory: [
+          {
+            type: "call",
+            call: "acdt/66",
+            date: "2026-01-19",
+            link: null,
+          },
+        ],
+      },
+    ],
+    laymanDescription: "Proposes to increase gas costs for state creation to mitigate state growth under higher throughput regimes.",
+    northStars: null,
+    northStarAlignment: {
+      scaleL1: {
+        description: "By making state creation more expensive, this EIP helps control state growth, which is crucial for scaling Ethereum.",
+      },
+    },
+    stakeholderImpacts: {
+      endUsers: {
+        description: "Users may experience higher transaction fees for creating new accounts and contracts, but improved scalability benefits all.",
+      },
+      appDevs: {
+        description: "Developers should anticipate increased deployment costs, necessitating adjustments to gas estimation tools and budget projections.",
+      },
+      walletDevs: {
+        description: "Wallet developers need to update gas estimations to reflect new costs; otherwise, minimal code changes are needed.",
+      },
+      toolingInfra: {
+        description: "Tooling and infrastructure must accommodate new pricing models for transaction estimates, with only minor changes to existing tools.",
+      },
+      layer2s: {
+        description: "L2s adopting this EIP will align with mainnet behaviors, requiring thorough testing and client updates for accurate operations.",
+      },
+      stakersNodes: {
+        description: "Node operators will need to update their clients for new gas parameters; otherwise, operations and validation remain unchanged.",
+      },
+      clClients: {
+        description: "Minimal changes expected for CL clients; primarily involves standard fork coordination with minimal complexity.",
+      },
+      elClients: {
+        description: "Must integrate new gas costs into transaction handling, requiring updates to gas accounting and ensuring compatibility with existing EIP standards.",
+      },
+    },
+    benefits: [
+      "Standardizes costs across all state creation operations.",
+      "Mitigates excessive state growth, enhancing Ethereum's overall scalability.",
+      "Encourages developers to optimize contract designs due to increased costs.",
+    ],
+    tradeoffs: null,
+  });
+});
+
+test("WHI-60 normalizeEipForOutput materializes nulls before JSON serialization", async () => {
+  assert.equal(
+    build.status,
+    0,
+    `expected build to succeed\nstdout:\n${build.stdout}\nstderr:\n${build.stderr}`,
+  );
+
+  const { normalizeEipForOutput } = await importEipModule();
+  const sparseEip = readFixtureJson("reference-eip-7702.json");
+
+  delete sparseEip.category;
+  delete sparseEip.discussionLink;
+  delete sparseEip.reviewer;
+  delete sparseEip.layer;
+  delete sparseEip.laymanDescription;
+  delete sparseEip.northStars;
+  delete sparseEip.northStarAlignment;
+  delete sparseEip.stakeholderImpacts;
+  delete sparseEip.benefits;
+  delete sparseEip.tradeoffs;
+  delete sparseEip.forkRelationships[0].champions;
+  delete sparseEip.forkRelationships[0].isHeadliner;
+  delete sparseEip.forkRelationships[0].wasHeadlinerCandidate;
+  delete sparseEip.forkRelationships[0].presentationHistory;
+
+  const normalized = normalizeEipForOutput(sparseEip);
+
+  assertNoUndefinedDeep(normalized);
+  assert.equal(normalized.category, null);
+  assert.equal(normalized.forkRelationships[0].champions, null);
+  assert.equal(normalized.forkRelationships[0].isHeadliner, null);
+  assert.equal(normalized.forkRelationships[0].wasHeadlinerCandidate, null);
+  assert.equal(normalized.forkRelationships[0].presentationHistory, null);
 });
 
 test("WHI-60 preserves FETCH_FAILED when cache bootstrap fails", async () => {
