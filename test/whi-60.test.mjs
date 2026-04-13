@@ -32,6 +32,30 @@ function createCacheRoot(prefix = "whi-60-cache-") {
   return fs.mkdtempSync(path.join(os.tmpdir(), prefix));
 }
 
+function assertNoUndefinedDeep(value, seen = new Set()) {
+  if (value === null || typeof value !== "object") {
+    assert.notEqual(value, undefined);
+    return;
+  }
+
+  if (seen.has(value)) {
+    return;
+  }
+  seen.add(value);
+
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      assertNoUndefinedDeep(item, seen);
+    }
+    return;
+  }
+
+  for (const entry of Object.values(value)) {
+    assert.notEqual(entry, undefined);
+    assertNoUndefinedDeep(entry, seen);
+  }
+}
+
 function runForkcast(args, { cacheRoot, env } = {}) {
   return spawnSync("./bin/forkcast", args, {
     cwd: rootDir,
@@ -261,6 +285,37 @@ test("WHI-60 pretty output includes latest fork call and date details", () => {
   }
 });
 
+test("WHI-60 pretty output keeps lay summary before the fork relationships section", () => {
+  assert.equal(
+    build.status,
+    0,
+    `expected build to succeed\nstdout:\n${build.stdout}\nstderr:\n${build.stderr}`,
+  );
+
+  const cacheRoot = createCacheRoot();
+
+  try {
+    seedRawCache(cacheRoot, {
+      eips: [readFixtureJson("reference-eip-8037.json")],
+    });
+
+    const result = runForkcast(["eip", "8037", "--pretty"], { cacheRoot });
+
+    assert.equal(result.status, 0, `stdout:\n${result.stdout}\nstderr:\n${result.stderr}`);
+    const descriptionIndex = result.stdout.indexOf("Description:");
+    const laySummaryIndex = result.stdout.indexOf("Lay Summary:");
+    const forkRelationshipsIndex = result.stdout.indexOf("Fork relationships:");
+
+    assert.notEqual(descriptionIndex, -1);
+    assert.notEqual(laySummaryIndex, -1);
+    assert.notEqual(forkRelationshipsIndex, -1);
+    assert.ok(descriptionIndex < laySummaryIndex, result.stdout);
+    assert.ok(laySummaryIndex < forkRelationshipsIndex, result.stdout);
+  } finally {
+    fs.rmSync(cacheRoot, { force: true, recursive: true });
+  }
+});
+
 test("WHI-60 returns EIP_NOT_FOUND when the requested EIP is missing", () => {
   assert.equal(
     build.status,
@@ -378,21 +433,64 @@ test("WHI-60 normalizes missing optional EIP fields to null in JSON output", () 
     seedRawCache(cacheRoot, { eips: [sparseEip] });
 
     const result = runForkcast(["eip", "7702"], { cacheRoot });
+    const outputEip = JSON.parse(result.stdout).results[0];
 
     assert.equal(result.status, 0, `stdout:\n${result.stdout}\nstderr:\n${result.stderr}`);
-    assert.deepEqual(JSON.parse(result.stdout).results[0], {
-      ...readFixtureJson("reference-eip-7702.json"),
-      category: null,
-      discussionLink: null,
-      reviewer: null,
-      layer: null,
-      laymanDescription: null,
-      northStars: null,
-      northStarAlignment: null,
-      stakeholderImpacts: null,
-      benefits: null,
-      tradeoffs: null,
+    assert.equal(outputEip.category, null);
+    assert.equal(outputEip.discussionLink, null);
+    assert.equal(outputEip.reviewer, null);
+    assert.equal(outputEip.layer, null);
+    assert.equal(outputEip.laymanDescription, null);
+    assert.equal(outputEip.northStars, null);
+    assert.equal(outputEip.northStarAlignment, null);
+    assert.equal(outputEip.stakeholderImpacts, null);
+    assert.equal(outputEip.benefits, null);
+    assert.equal(outputEip.tradeoffs, null);
+    assertNoUndefinedDeep(outputEip);
+  } finally {
+    fs.rmSync(cacheRoot, { force: true, recursive: true });
+  }
+});
+
+test("WHI-60 normalizes nested fork relationship sparse fields to null", () => {
+  assert.equal(
+    build.status,
+    0,
+    `expected build to succeed\nstdout:\n${build.stdout}\nstderr:\n${build.stderr}`,
+  );
+
+  const cacheRoot = createCacheRoot();
+  const sparseEip = readFixtureJson("reference-eip-7702.json");
+
+  delete sparseEip.forkRelationships[0].champions;
+  delete sparseEip.forkRelationships[0].isHeadliner;
+  delete sparseEip.forkRelationships[0].wasHeadlinerCandidate;
+  delete sparseEip.forkRelationships[0].presentationHistory;
+  delete sparseEip.forkRelationships[0].statusHistory[0].timestamp;
+
+  try {
+    seedRawCache(cacheRoot, { eips: [sparseEip] });
+
+    const result = runForkcast(["eip", "7702"], { cacheRoot });
+    const outputEip = JSON.parse(result.stdout).results[0];
+
+    assert.equal(result.status, 0, `stdout:\n${result.stdout}\nstderr:\n${result.stderr}`);
+    assert.deepEqual(outputEip.forkRelationships[0], {
+      forkName: "Pectra",
+      statusHistory: [
+        {
+          status: "Included",
+          call: null,
+          date: null,
+          timestamp: null,
+        },
+      ],
+      champions: null,
+      isHeadliner: null,
+      wasHeadlinerCandidate: null,
+      presentationHistory: null,
     });
+    assertNoUndefinedDeep(outputEip);
   } finally {
     fs.rmSync(cacheRoot, { force: true, recursive: true });
   }

@@ -4,7 +4,19 @@ import { Command } from "commander";
 import { loadCache } from "../lib/cache.js";
 import { getCacheLayout, getCacheRoot, type WritableLike } from "../lib/fetcher.js";
 import { exitCodeForErrorCode, writeJsonEnvelope, writeJsonError, writePrettyError } from "../lib/output.js";
-import type { ContextEntry, Eip, ErrorCode, OutputEip, OutputEnvelope, OutputSource } from "../types/index.js";
+import type {
+  ContextEntry,
+  Eip,
+  ErrorCode,
+  OutputEip,
+  OutputEnvelope,
+  OutputForkChampion,
+  OutputForkRelationship,
+  OutputForkStatusHistoryEntry,
+  OutputPresentationHistoryEntry,
+  OutputSource,
+  PresentationHistoryEntry,
+} from "../types/index.js";
 
 class EipCommandError extends Error {
   code: ErrorCode;
@@ -55,12 +67,53 @@ function parseEipNumber(value: string) {
   return parsed;
 }
 
+function normalizeForkChampion(champion: NonNullable<Eip["forkRelationships"][number]["champions"]>[number]): OutputForkChampion {
+  return {
+    name: champion.name,
+    discord: champion.discord ?? null,
+    email: champion.email ?? null,
+    telegram: champion.telegram ?? null,
+  };
+}
+
+function normalizeForkStatusHistoryEntry(
+  entry: Eip["forkRelationships"][number]["statusHistory"][number],
+): OutputForkStatusHistoryEntry {
+  return {
+    status: entry.status,
+    call: entry.call ?? null,
+    date: entry.date ?? null,
+    timestamp: entry.timestamp ?? null,
+  };
+}
+
+function normalizePresentationHistoryEntry(entry: PresentationHistoryEntry): OutputPresentationHistoryEntry {
+  return {
+    type: entry.type,
+    call: typeof entry.call === "string" ? entry.call : null,
+    date: entry.date,
+    link: typeof entry.link === "string" ? entry.link : null,
+  };
+}
+
+function normalizeForkRelationship(relationship: Eip["forkRelationships"][number]): OutputForkRelationship {
+  return {
+    forkName: relationship.forkName,
+    statusHistory: relationship.statusHistory.map(normalizeForkStatusHistoryEntry),
+    champions: relationship.champions?.map(normalizeForkChampion) ?? null,
+    isHeadliner: relationship.isHeadliner ?? null,
+    wasHeadlinerCandidate: relationship.wasHeadlinerCandidate ?? null,
+    presentationHistory: relationship.presentationHistory?.map(normalizePresentationHistoryEntry) ?? null,
+  };
+}
+
 function normalizeEipForOutput(eip: Eip): OutputEip {
   return {
     ...eip,
     benefits: eip.benefits ?? null,
     category: eip.category ?? null,
     discussionLink: eip.discussionLink ?? null,
+    forkRelationships: eip.forkRelationships.map(normalizeForkRelationship),
     layer: eip.layer ?? null,
     laymanDescription: eip.laymanDescription ?? null,
     northStarAlignment: eip.northStarAlignment ?? null,
@@ -146,13 +199,13 @@ function formatPrettyEip(
     "",
     "Description:",
     eip.description,
-    "",
-    "Fork relationships:",
   ];
 
   if (eip.laymanDescription) {
     lines.push("", "Lay Summary:", eip.laymanDescription);
   }
+
+  lines.push("", "Fork relationships:");
 
   if (eip.forkRelationships.length === 0) {
     lines.push("- none");
@@ -224,17 +277,18 @@ async function handleEipCommand(
   command: Command,
   deps: EipCommandDependencies,
 ) {
+  const parsedOptions = command.optsWithGlobals<{ context?: boolean; pretty?: boolean }>();
+
   try {
-    const parsedOptions = command.optsWithGlobals<{ context?: boolean; pretty?: boolean }>();
     await runEipCommand(eipNumberArg, {
-      context: options.context === true,
+      context: parsedOptions.context === true,
       pretty: parsedOptions.pretty === true,
     }, deps);
   } catch (error) {
     const code = getCommandErrorCode(error);
     const message = error instanceof Error ? error.message : String(error);
 
-    if (command.optsWithGlobals<{ pretty?: boolean }>().pretty === true) {
+    if (parsedOptions.pretty === true) {
       writePrettyError(message, deps.stderr);
     } else {
       writeJsonError({
