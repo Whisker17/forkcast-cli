@@ -1,4 +1,5 @@
 import { Command } from "commander";
+import { eipCommand } from "./commands/eip.js";
 import { VERSION } from "./generated/version.js";
 
 const program = new Command();
@@ -10,4 +11,7 @@ program
   .showHelpAfterError()
   .showSuggestionAfterError();
 
-program.parse();
+program.option("--pretty", "Human-readable output instead of JSON");
+program.addCommand(eipCommand);
+
+await program.parseAsync();

@@ -86,6 +86,31 @@ export interface Eip {
   tradeoffs: string[] | null;
 }
 
+export interface OutputEip extends Omit<
+  Eip,
+  | "benefits"
+  | "category"
+  | "discussionLink"
+  | "layer"
+  | "laymanDescription"
+  | "northStarAlignment"
+  | "northStars"
+  | "reviewer"
+  | "stakeholderImpacts"
+  | "tradeoffs"
+> {
+  benefits: string[] | null;
+  category: string | null;
+  discussionLink: string | null;
+  layer: "EL" | "CL" | null;
+  laymanDescription: string | null;
+  northStarAlignment: Record<string, DescriptionEntry> | null;
+  northStars: string[] | null;
+  reviewer: string | null;
+  stakeholderImpacts: Record<string, DescriptionEntry> | null;
+  tradeoffs: string[] | null;
+}
+
 export interface MeetingHighlight {
   timestamp: string;
   highlight: string;

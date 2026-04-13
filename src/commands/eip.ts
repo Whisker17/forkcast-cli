@@ -1,0 +1,265 @@
+import fsp from "node:fs/promises";
+import path from "node:path";
+import { Command } from "commander";
+import { loadCache } from "../lib/cache.js";
+import { getCacheLayout, getCacheRoot, type WritableLike } from "../lib/fetcher.js";
+import { exitCodeForErrorCode, writeJsonEnvelope, writeJsonError, writePrettyError } from "../lib/output.js";
+import type { ContextEntry, Eip, ErrorCode, OutputEip, OutputEnvelope, OutputSource } from "../types/index.js";
+
+class EipCommandError extends Error {
+  code: ErrorCode;
+
+  constructor(message: string, code: ErrorCode, options?: ErrorOptions) {
+    super(message, options);
+    this.name = "EipCommandError";
+    this.code = code;
+  }
+}
+
+const ERROR_CODES = new Set<ErrorCode>([
+  "NOT_CACHED",
+  "EIP_NOT_FOUND",
+  "FETCH_FAILED",
+  "DATA_ERROR",
+  "INVALID_INPUT",
+]);
+
+export interface EipCommandDependencies {
+  getCacheRoot: () => string;
+  loadCache: typeof loadCache;
+  readFile: typeof fsp.readFile;
+  stderr: WritableLike;
+  stdout: WritableLike;
+}
+
+function getDefaultDependencies(): EipCommandDependencies {
+  return {
+    getCacheRoot,
+    loadCache,
+    readFile: fsp.readFile.bind(fsp),
+    stderr: process.stderr,
+    stdout: process.stdout,
+  };
+}
+
+function parseEipNumber(value: string) {
+  if (!/^\d+$/.test(value)) {
+    throw new EipCommandError("Invalid EIP number", "INVALID_INPUT");
+  }
+
+  const parsed = Number(value);
+  if (!Number.isSafeInteger(parsed) || parsed <= 0) {
+    throw new EipCommandError("Invalid EIP number", "INVALID_INPUT");
+  }
+
+  return parsed;
+}
+
+function normalizeEipForOutput(eip: Eip): OutputEip {
+  return {
+    ...eip,
+    benefits: eip.benefits ?? null,
+    category: eip.category ?? null,
+    discussionLink: eip.discussionLink ?? null,
+    layer: eip.layer ?? null,
+    laymanDescription: eip.laymanDescription ?? null,
+    northStarAlignment: eip.northStarAlignment ?? null,
+    northStars: eip.northStars ?? null,
+    reviewer: eip.reviewer ?? null,
+    stakeholderImpacts: eip.stakeholderImpacts ?? null,
+    tradeoffs: eip.tradeoffs ?? null,
+  };
+}
+
+async function readCachedEip(
+  cacheRoot: string,
+  eipId: number,
+  deps: Pick<EipCommandDependencies, "readFile">,
+): Promise<OutputEip> {
+  const eipPath = path.join(getCacheLayout(cacheRoot).eipsDir, `${eipId}.json`);
+
+  try {
+    return normalizeEipForOutput(JSON.parse(await deps.readFile(eipPath, "utf8")) as Eip);
+  } catch (error) {
+    if (error && typeof error === "object" && "code" in error && error.code === "ENOENT") {
+      throw new EipCommandError(`EIP ${eipId} not found`, "EIP_NOT_FOUND", { cause: error });
+    }
+
+    if (error instanceof SyntaxError) {
+      throw new EipCommandError(`EIP ${eipId} contains invalid JSON`, "DATA_ERROR", { cause: error });
+    }
+
+    throw new EipCommandError(
+      `Failed to read cached EIP ${eipId}: ${error instanceof Error ? error.message : String(error)}`,
+      "DATA_ERROR",
+      { cause: error },
+    );
+  }
+}
+
+function getLatestForkStatusDetails(eip: OutputEip["forkRelationships"][number]) {
+  const latestStatus = eip.statusHistory.at(-1);
+  if (!latestStatus) {
+    return "Unknown";
+  }
+
+  const details = [latestStatus.date, latestStatus.call].filter(
+    (value): value is string => typeof value === "string" && value.length > 0,
+  );
+
+  return details.length > 0
+    ? `${latestStatus.status} (${details.join(", ")})`
+    : latestStatus.status;
+}
+
+function formatContextSection(context: ContextEntry[]) {
+  if (context.length === 0) {
+    return "Related meetings: none";
+  }
+
+  const lines = ["Related meetings:"];
+  for (const entry of context) {
+    lines.push(`- ${entry.meeting} (${entry.date})`);
+    for (const mention of entry.mentions) {
+      lines.push(`  - ${mention}`);
+    }
+  }
+
+  return lines.join("\n");
+}
+
+function formatPrettyEip(
+  eip: OutputEip,
+  source: OutputSource,
+  context?: ContextEntry[],
+) {
+  const lines = [
+    `${eip.title}`,
+    `Status: ${eip.status}`,
+    `Type: ${eip.type}`,
+    `Category: ${eip.category ?? "n/a"}`,
+    `Layer: ${eip.layer ?? "n/a"}`,
+    `Created: ${eip.createdDate}`,
+    `Author: ${eip.author}`,
+    `Source: ${source.forkcast_commit}`,
+    `Updated: ${source.last_updated}`,
+    "",
+    "Description:",
+    eip.description,
+    "",
+    "Fork relationships:",
+  ];
+
+  if (eip.laymanDescription) {
+    lines.push("", "Lay Summary:", eip.laymanDescription);
+  }
+
+  if (eip.forkRelationships.length === 0) {
+    lines.push("- none");
+  } else {
+    for (const relationship of eip.forkRelationships) {
+      lines.push(`- ${relationship.forkName}: ${getLatestForkStatusDetails(relationship)}`);
+    }
+  }
+
+  if (context) {
+    lines.push("", formatContextSection(context));
+  }
+
+  return `${lines.join("\n")}\n`;
+}
+
+async function runEipCommand(
+  eipNumberArg: string,
+  options: { context?: boolean; pretty?: boolean },
+  deps: EipCommandDependencies,
+) {
+  const cacheRoot = deps.getCacheRoot();
+  const eipId = parseEipNumber(eipNumberArg);
+  const loaded = await deps.loadCache({ cacheRoot, stderr: deps.stderr });
+  const eip = await readCachedEip(cacheRoot, eipId, deps);
+  const context = options.context
+    ? ((await loaded.readContextIndex())[String(eipId)] ?? [])
+    : undefined;
+
+  const envelope: OutputEnvelope<OutputEip> = {
+    query: {
+      command: "eip",
+      filters: {
+        id: eipId,
+        ...(options.context ? { context: true } : {}),
+      },
+    },
+    results: [eip],
+    count: 1,
+    source: {
+      forkcast_commit: loaded.meta.forkcast_commit,
+      last_updated: loaded.meta.last_updated,
+    },
+    ...(context ? { context } : {}),
+  };
+
+  if (options.pretty) {
+    deps.stdout.write(formatPrettyEip(eip, envelope.source, context));
+    return;
+  }
+
+  writeJsonEnvelope(envelope, deps.stdout);
+}
+
+function getCommandErrorCode(error: unknown): ErrorCode {
+  if (error && typeof error === "object" && "code" in error) {
+    const code = (error as { code?: unknown }).code;
+    if (typeof code === "string" && ERROR_CODES.has(code as ErrorCode)) {
+      return code as ErrorCode;
+    }
+  }
+
+  return "DATA_ERROR";
+}
+
+async function handleEipCommand(
+  eipNumberArg: string,
+  options: { context?: boolean; pretty?: boolean },
+  command: Command,
+  deps: EipCommandDependencies,
+) {
+  try {
+    const parsedOptions = command.optsWithGlobals<{ context?: boolean; pretty?: boolean }>();
+    await runEipCommand(eipNumberArg, {
+      context: options.context === true,
+      pretty: parsedOptions.pretty === true,
+    }, deps);
+  } catch (error) {
+    const code = getCommandErrorCode(error);
+    const message = error instanceof Error ? error.message : String(error);
+
+    if (command.optsWithGlobals<{ pretty?: boolean }>().pretty === true) {
+      writePrettyError(message, deps.stderr);
+    } else {
+      writeJsonError({
+        error: message,
+        code,
+      }, deps.stdout, deps.stderr);
+    }
+    process.exitCode = exitCodeForErrorCode(code);
+  }
+}
+
+export function createEipCommand(
+  overrides: Partial<EipCommandDependencies> = {},
+) {
+  const deps = {
+    ...getDefaultDependencies(),
+    ...overrides,
+  } satisfies EipCommandDependencies;
+
+  return new Command("eip")
+    .description("Look up a single EIP by number")
+    .argument("<number>", "EIP number")
+    .option("--context", "Include related meeting mentions")
+    .option("--pretty", "Human-readable output instead of JSON")
+    .action((eipNumberArg, options, command) => handleEipCommand(eipNumberArg, options, command, deps));
+}
+
+export const eipCommand = createEipCommand();
