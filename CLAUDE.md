@@ -137,7 +137,7 @@ src/
 
 - **Node.js version:** >= 20
 - **Module system:** ESM (`"type": "module"`, tsconfig target `ES2022`, module `Node16`)
-- **Runtime dependencies:** `commander` only. Everything else uses Node built-ins (`node:fs`, `node:path`, `node:https`, `node:zlib`)
+- **Runtime dependencies:** `commander`, `tar`. Everything else uses Node built-ins (`node:fs`, `node:path`, `node:https`, `node:zlib`)
 - **Cache directory:** `FORKCAST_CACHE` env var or `~/.forkcast/`
 - **Commit messages:** reference Linear issues: `feat(WHI-58): implement data fetcher`
 
