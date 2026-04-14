@@ -720,3 +720,21 @@ export function getCacheRoot() {
 export function getCacheLayout(cacheRoot = getDefaultCacheRoot()) {
   return getCachePaths(cacheRoot);
 }
+
+/**
+ * Fetch a single meeting TLDR from GitHub Pages on demand.
+ *
+ * Returns the prettified JSON string on success, `null` when the upstream
+ * confirms the TLDR does not exist (HTTP 404).  Throws `FetcherError` on
+ * network or data errors so callers can distinguish "no TLDR" from "fetch
+ * broke".
+ */
+export async function fetchTldr(
+  type: string,
+  dirName: string,
+  options: { pagesBaseUrl?: string; requestTimeoutMs?: number } = {},
+): Promise<string | null> {
+  const pagesBaseUrl = options.pagesBaseUrl ?? DEFAULT_PAGES_BASE_URL;
+  const timeoutMs = options.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
+  return fetchTldrContents(pagesBaseUrl, { type, dirName }, timeoutMs);
+}
