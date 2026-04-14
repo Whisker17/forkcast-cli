@@ -816,6 +816,7 @@ test("WHI-60 light path falls back to loadCache when cache is partial (meta.json
         writeJson(path.join(cacheDir, "meetings-index.json"), []);
         return {
           meta: fullMeta,
+          db: null,
           readContextIndex: async () => ({}),
           readEipsIndex: async () => [],
           readMeetingsIndex: async () => [],
@@ -895,6 +896,7 @@ test("WHI-60 light path falls back to loadCache when eips/ dir exists but reques
         writeJson(path.join(cacheDir, "meetings-index.json"), []);
         return {
           meta: fullMeta,
+          db: null,
           readContextIndex: async () => ({}),
           readEipsIndex: async () => [],
           readMeetingsIndex: async () => [],

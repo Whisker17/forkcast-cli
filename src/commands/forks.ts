@@ -1,5 +1,6 @@
 import { Command } from "commander";
 import { loadCache } from "../lib/cache.js";
+import { countEipsByFork } from "../lib/db.js";
 import { getCommandErrorCode } from "../lib/errors.js";
 import { loadEipsIndex } from "../lib/eips-index-loader.js";
 import { getCacheRoot, type WritableLike } from "../lib/fetcher.js";
@@ -217,10 +218,38 @@ async function runForksCommand(
 ) {
   const pretty = options.pretty === true;
   const cacheRoot = deps.getCacheRoot();
-  const { loaded, allEntries } = await loadEipsIndex(cacheRoot, deps);
+
+  // Load cache first — if DB is available we skip the JSON index entirely.
+  const loaded = await deps.loadCache({ cacheRoot, stderr: deps.stderr });
+
+  // Only load the full JSON index when the DB is unavailable.
+  let allEntries: EipIndexEntry[] | undefined;
+  if (!loaded.db) {
+    const idx = await loadEipsIndex(cacheRoot, deps);
+    allEntries = idx.allEntries;
+  }
 
   const results: ForkResult[] = FORK_DEFINITIONS.map((fork) => {
-    const eipsByInclusion = countEipsForFork(allEntries, fork.name);
+    let eipsByInclusion: EipsByInclusion;
+
+    if (loaded.db) {
+      // Single GROUP BY query per fork — no JSON.parse, no N+1.
+      const dbCounts = countEipsByFork(loaded.db, fork.name);
+      eipsByInclusion = {
+        Proposed: 0,
+        Considered: 0,
+        Scheduled: 0,
+        Included: 0,
+        Declined: 0,
+        Withdrawn: 0,
+      };
+      for (const status of ALL_INCLUSION_STATUSES) {
+        eipsByInclusion[status] = dbCounts[status] ?? 0;
+      }
+    } else {
+      eipsByInclusion = countEipsForFork(allEntries!, fork.name);
+    }
+
     return {
       name: fork.name,
       status: fork.status,

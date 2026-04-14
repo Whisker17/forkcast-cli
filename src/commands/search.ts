@@ -2,6 +2,7 @@ import fsp from "node:fs/promises";
 import path from "node:path";
 import { Command } from "commander";
 import { loadCache } from "../lib/cache.js";
+import { searchEipsFts, searchMeetingsFts } from "../lib/db.js";
 import { CommandError, getCommandErrorCode } from "../lib/errors.js";
 import { getCacheLayout, getCacheRoot, type WritableLike } from "../lib/fetcher.js";
 import { getPmCachePaths } from "../lib/pm-fetcher.js";
@@ -613,13 +614,43 @@ async function runSearchCommand(
   let pmNoteHits: PmNoteSearchResult[] = [];
 
   if (!parsedFilters.type || parsedFilters.type === "eips") {
-    const rawEipHits = await searchEips(layout.eipsDir, termLower);
-    eipHits = sortEipHits(rawEipHits);
+    if (loaded.db) {
+      // Use LIKE-based search — single query vs O(n) file scanning.
+      const dbHits = searchEipsFts(loaded.db, parsedFilters.term);
+      // Sort by relevance tier (exact title > title contains > body), then by ID
+      dbHits.sort((a, b) => a._tier !== b._tier ? a._tier - b._tier : a.id - b.id);
+      eipHits = dbHits.map(({ _tier: _, ...hit }) => ({
+        source: "eip" as const,
+        eipId: hit.id,
+        title: hit.title,
+        status: hit.status as EipStatus,
+        matches: hit.matchedFields,
+      }));
+    } else {
+      const rawEipHits = await searchEips(layout.eipsDir, termLower);
+      eipHits = sortEipHits(rawEipHits);
+    }
   }
 
   if (!parsedFilters.type || parsedFilters.type === "meetings") {
-    const rawMeetingHits = await searchMeetings(layout.tldrsDir, termLower);
-    meetingHits = sortMeetingHits(rawMeetingHits);
+    if (loaded.db) {
+      // Use LIKE-based search — single query vs O(n) file scanning.
+      const ftsHits = searchMeetingsFts(loaded.db, parsedFilters.term);
+      meetingHits = ftsHits.map((hit) => {
+        const meetingName = hit.meetingName ?? `${hit.type.toUpperCase()} #${hit.number}`;
+        return {
+          source: "meeting" as const,
+          type: hit.type,
+          date: hit.date,
+          number: hit.number,
+          meeting: meetingName,
+          matches: hit.matchedTexts,
+        };
+      });
+    } else {
+      const rawMeetingHits = await searchMeetings(layout.tldrsDir, termLower);
+      meetingHits = sortMeetingHits(rawMeetingHits);
+    }
   }
 
   if (!parsedFilters.type || parsedFilters.type === "pm_notes") {

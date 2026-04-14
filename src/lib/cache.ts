@@ -3,6 +3,7 @@ import path from "node:path";
 import {
   fetchEipData,
   getCacheLayout,
+  getCacheRoot,
   type FetchEipDataOptions,
   type FetchEipDataResult,
   type WritableLike,
@@ -11,12 +12,20 @@ import {
   getPmCachePaths,
   readPmMeta,
 } from "./pm-fetcher.js";
+import { isNodeError, listJsonFiles, walkJsonFiles } from "./fs-utils.js";
+import { getTldrTextFields, getMeetingTargetText } from "./tldr-utils.js";
 import {
   parsePmMeeting,
   shouldSkipFile,
   type PmMeetingNote,
   type PmMeetingType,
 } from "./pm-parser.js";
+import {
+  buildSqliteDb,
+  dbIsValid,
+  openDb,
+  type Db,
+} from "./db.js";
 import type {
   CacheMeta,
   ContextEntry,
@@ -24,7 +33,6 @@ import type {
   EipIndexEntry,
   ErrorCode,
   MeetingIndexEntry,
-  MeetingTarget,
   MeetingTldr,
 } from "../types/index.js";
 
@@ -50,11 +58,16 @@ export interface LoadCacheOptions extends FetchEipDataOptions {
 
 export interface LoadedCache {
   meta: CacheMeta;
+  /** Open SQLite DB, or null when the DB is not available (first-fetch or legacy cache). */
+  db: Db | null;
   readContextIndex(): Promise<Record<string, ContextEntry[]>>;
   readEipsIndex(): Promise<EipIndexEntry[]>;
   readMeetingsIndex(): Promise<MeetingIndexEntry[]>;
   readPmNote(type: string, dirName: string): Promise<PmMeetingNote | null>;
 }
+
+// Re-export Db type so callers can reference it without importing db.ts directly.
+export type { Db };
 
 export class CacheError extends Error {
   code: ErrorCode;
@@ -112,15 +125,6 @@ function describeError(error: unknown) {
   return error instanceof Error ? error.message : String(error);
 }
 
-function isNodeError(error: unknown, code?: string): error is NodeJS.ErrnoException {
-  return Boolean(
-    error
-    && typeof error === "object"
-    && "code" in error
-    && (code === undefined || (error as NodeJS.ErrnoException).code === code),
-  );
-}
-
 async function readJsonFile<T>(filePath: string, label: string): Promise<T> {
   try {
     return JSON.parse(await fsp.readFile(filePath, "utf8")) as T;
@@ -163,47 +167,6 @@ async function ensureFetchResultMetadata(
     }));
     await writeJsonFileAtomic(paths.meetingsManifestPath, meetingsManifest);
   }
-}
-
-async function listJsonFiles(targetDir: string): Promise<string[]> {
-  let entries: string[];
-  try {
-    entries = await fsp.readdir(targetDir);
-  } catch (error) {
-    if (isNodeError(error, "ENOENT") || isNodeError(error, "ENOTDIR")) {
-      return [];
-    }
-    throw error;
-  }
-
-  return entries.filter((entry) => entry.endsWith(".json")).sort();
-}
-
-async function walkJsonFiles(targetDir: string): Promise<string[]> {
-  let entries;
-  try {
-    entries = await fsp.readdir(targetDir, { withFileTypes: true });
-  } catch (error) {
-    if (isNodeError(error, "ENOENT") || isNodeError(error, "ENOTDIR")) {
-      return [];
-    }
-    throw error;
-  }
-
-  const files = await Promise.all(entries.map(async (entry) => {
-    const entryPath = path.join(targetDir, entry.name);
-    if (entry.isDirectory()) {
-      return walkJsonFiles(entryPath);
-    }
-
-    if (entry.isFile() && entry.name.endsWith(".json")) {
-      return [entryPath];
-    }
-
-    return [];
-  }));
-
-  return files.flat().sort();
 }
 
 function parseMeetingRef(type: string, dirName: string): MeetingRef {
@@ -264,7 +227,10 @@ async function readMeetingManifest(paths: CachePaths): Promise<MeetingRef[]> {
 
 async function loadCachedTldrs(paths: CachePaths): Promise<CachedTldrEntry[]> {
   const filePaths = await walkJsonFiles(paths.tldrsDir);
-  return Promise.all(filePaths.map(async (filePath) => {
+  // Filter out _key_decisions.json files — they are not TLDRs and would fail
+  // parseMeetingRef() because their dirName includes the "_key_decisions" suffix.
+  const tldrPaths = filePaths.filter((p) => !p.endsWith("_key_decisions.json"));
+  return Promise.all(tldrPaths.map(async (filePath) => {
     const dirName = path.basename(filePath, ".json");
     const type = path.basename(path.dirname(filePath));
     return {
@@ -274,41 +240,9 @@ async function loadCachedTldrs(paths: CachePaths): Promise<CachedTldrEntry[]> {
   }));
 }
 
-function getTldrTextFields(tldr: MeetingTldr): string[] {
-  const fields: string[] = [];
-
-  for (const items of Object.values(tldr.highlights)) {
-    for (const item of items) {
-      fields.push(item.highlight);
-    }
-  }
-
-  for (const decision of tldr.decisions) {
-    fields.push(decision.decision);
-  }
-
-  for (const actionItem of tldr.action_items) {
-    fields.push(actionItem.action);
-  }
-
-  for (const target of tldr.targets ?? []) {
-    fields.push(getMeetingTargetText(target));
-  }
-
-  return fields;
-}
-
-function getMeetingTargetText(target: MeetingTarget) {
-  if ("target" in target && typeof target.target === "string") {
-    return target.target;
-  }
-
-  if ("commitment" in target && typeof target.commitment === "string") {
-    return target.commitment;
-  }
-
-  throw new CacheError("Meeting target entry is missing both target and commitment text", "DATA_ERROR");
-}
+// getTldrTextFields and getMeetingTargetText are imported from tldr-utils.ts
+// Re-export for consumers that already import from cache.ts
+export { getTldrTextFields, getMeetingTargetText } from "./tldr-utils.js";
 
 function hasNonEmptyRecord(value: Record<string, unknown> | null | undefined) {
   return value != null && Object.keys(value).length > 0;
@@ -802,6 +736,17 @@ export async function buildCache(options: BuildCacheOptions = {}): Promise<Build
     writeJsonFileAtomic(paths.meetingsIndexPath, meetingsIndex),
   ]);
 
+  // Build SQLite database after JSON indexes are written.
+  // Errors here are non-fatal: JSON indexes remain the fallback.
+  try {
+    await buildSqliteDb(options.cacheRoot ?? getCacheRoot());
+  } catch (err) {
+    // Log but don't fail — commands fall back to JSON indexes.
+    process.stderr.write(
+      `Warning: SQLite DB build failed (JSON indexes will be used instead): ${err instanceof Error ? err.message : String(err)}\n`,
+    );
+  }
+
   return {
     meta,
     eipCount: eipsIndex.length,
@@ -828,8 +773,23 @@ export async function loadCache(options: LoadCacheOptions = {}): Promise<LoadedC
   meta ??= await readMeta(paths);
   warnIfStale(meta, stderr);
 
+  // Open SQLite DB if it is valid; otherwise fall back to JSON indexes.
+  const cacheRoot = options.cacheRoot ?? getCacheRoot();
+  let db: Db | null = null;
+  if (await dbIsValid(cacheRoot)) {
+    try {
+      db = openDb(cacheRoot, { readonly: true });
+      // Ensure the DB file descriptor is released when the process exits.
+      const dbRef = db;
+      process.on("exit", () => { try { dbRef.close(); } catch { /* ignore */ } });
+    } catch {
+      db = null;
+    }
+  }
+
   return {
     meta,
+    db,
     readContextIndex: createLazyReader(paths.contextIndexPath, "context-index.json"),
     readEipsIndex: createLazyReader(paths.eipsIndexPath, "eips-index.json"),
     readMeetingsIndex: createLazyReader(paths.meetingsIndexPath, "meetings-index.json"),
