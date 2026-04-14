@@ -1,10 +1,11 @@
 import fsp from "node:fs/promises";
 import path from "node:path";
 import { Command } from "commander";
-import { loadCache } from "../lib/cache.js";
+import { loadCache, warnIfStale } from "../lib/cache.js";
 import { getCacheLayout, getCacheRoot, type WritableLike } from "../lib/fetcher.js";
 import { exitCodeForErrorCode, writeJsonEnvelope, writeJsonError, writePrettyError } from "../lib/output.js";
 import type {
+  CacheMeta,
   ContextEntry,
   Eip,
   ErrorCode,
@@ -229,6 +230,34 @@ function formatPrettyEip(
   return `${lines.join("\n")}\n`;
 }
 
+/**
+ * Light path: read meta.json directly without triggering a full index rebuild.
+ * Verifies the eips directory also exists — if the cache is only partially
+ * populated (e.g. meta.json present but eips/ missing), falls back to
+ * loadCache which auto-fetches + rebuilds.
+ */
+async function loadMetaOrFetch(
+  cacheRoot: string,
+  deps: EipCommandDependencies,
+): Promise<CacheMeta> {
+  const layout = getCacheLayout(cacheRoot);
+  try {
+    const [metaContent] = await Promise.all([
+      deps.readFile(layout.metaPath, "utf8"),
+      // Verify the eips directory exists.  Without this check, a partial cache
+      // (meta.json present, eips/ missing) would fall through to readCachedEip
+      // which would misreport the missing file as EIP_NOT_FOUND.
+      fsp.stat(layout.eipsDir),
+    ]);
+    return JSON.parse(metaContent) as CacheMeta;
+  } catch {
+    // Cache doesn't exist or is incomplete — fall back to full loadCache to
+    // trigger auto-fetch.
+    const loaded = await deps.loadCache({ cacheRoot, stderr: deps.stderr });
+    return loaded.meta;
+  }
+}
+
 async function runEipCommand(
   eipNumberArg: string,
   options: { context?: boolean; pretty?: boolean },
@@ -236,11 +265,48 @@ async function runEipCommand(
 ) {
   const cacheRoot = deps.getCacheRoot();
   const eipId = parseEipNumber(eipNumberArg);
-  const loaded = await deps.loadCache({ cacheRoot, stderr: deps.stderr });
-  const eip = await readCachedEip(cacheRoot, eipId, deps);
-  const context = options.context
-    ? ((await loaded.readContextIndex())[String(eipId)] ?? [])
-    : undefined;
+
+  let meta: CacheMeta;
+  let context: ContextEntry[] | undefined;
+  let usedLightPath = false;
+
+  if (options.context) {
+    // Full path: needs the context index, which requires loadCache + potential
+    // index rebuild.  This is expected — building the context index requires
+    // parsing all TLDRs.
+    const loaded = await deps.loadCache({ cacheRoot, stderr: deps.stderr });
+    meta = loaded.meta;
+    const contextIndex = await loaded.readContextIndex();
+    context = contextIndex[String(eipId)] ?? [];
+  } else {
+    // Light path: only needs meta.json + the single EIP file.  Skips the full
+    // index rebuild, so a malformed *sibling* EIP cannot break this lookup.
+    meta = await loadMetaOrFetch(cacheRoot, deps);
+    warnIfStale(meta, deps.stderr);
+    usedLightPath = true;
+  }
+
+  let eip: OutputEip;
+  try {
+    eip = await readCachedEip(cacheRoot, eipId, deps);
+  } catch (error) {
+    // On the light path, a missing EIP file could mean the cache is incomplete
+    // (e.g. empty eips/ dir, interrupted fetch) rather than the EIP genuinely
+    // not existing.  Fall back to loadCache (which auto-fetches if needed) and
+    // retry once.  If the file is still missing after a full load, it's a real
+    // EIP_NOT_FOUND.
+    if (
+      usedLightPath
+      && error instanceof EipCommandError
+      && error.code === "EIP_NOT_FOUND"
+    ) {
+      const loaded = await deps.loadCache({ cacheRoot, stderr: deps.stderr });
+      meta = loaded.meta;
+      eip = await readCachedEip(cacheRoot, eipId, deps);
+    } else {
+      throw error;
+    }
+  }
 
   const envelope: OutputEnvelope<OutputEip> = {
     query: {
@@ -253,8 +319,8 @@ async function runEipCommand(
     results: [eip],
     count: 1,
     source: {
-      forkcast_commit: loaded.meta.forkcast_commit,
-      last_updated: loaded.meta.last_updated,
+      forkcast_commit: meta.forkcast_commit,
+      last_updated: meta.last_updated,
     },
     ...(context ? { context } : {}),
   };

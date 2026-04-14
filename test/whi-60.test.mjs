@@ -716,3 +716,244 @@ test("WHI-60 preserves FETCH_FAILED when cache bootstrap fails", async () => {
     process.exitCode = previousExitCode;
   }
 });
+
+test("WHI-60 single-EIP lookup succeeds even when a sibling EIP would break index rebuild", () => {
+  assert.equal(
+    build.status,
+    0,
+    `expected build to succeed\nstdout:\n${build.stdout}\nstderr:\n${build.stderr}`,
+  );
+
+  const cacheRoot = createCacheRoot();
+
+  try {
+    // Seed a valid EIP plus a malformed one with empty statusHistory (which
+    // causes buildEipsIndex → getLatestForkInclusionStatus to throw).
+    const validEip = readFixtureJson("reference-eip-7702.json");
+    const malformedEip = {
+      id: 99990,
+      title: "Malformed EIP",
+      status: "Draft",
+      description: "This EIP has a fork relationship with empty statusHistory",
+      author: "Test",
+      type: "Standards Track",
+      category: "Core",
+      createdDate: "2026-01-01",
+      forkRelationships: [
+        {
+          forkName: "Glamsterdam",
+          statusHistory: [],
+        },
+      ],
+      tradeoffs: null,
+    };
+
+    seedRawCache(cacheRoot, { eips: [validEip, malformedEip] });
+
+    // Without --context, single-EIP lookup should NOT trigger index rebuild,
+    // so the malformed sibling cannot break it.
+    const result = runForkcast(["eip", "7702"], { cacheRoot });
+
+    assert.equal(
+      result.status,
+      0,
+      `expected command to succeed despite malformed sibling\nstdout:\n${result.stdout}\nstderr:\n${result.stderr}`,
+    );
+
+    const output = JSON.parse(result.stdout);
+    assert.equal(output.results[0].id, 7702);
+    assert.equal(output.count, 1);
+  } finally {
+    fs.rmSync(cacheRoot, { force: true, recursive: true });
+  }
+});
+
+test("WHI-60 light path falls back to loadCache when cache is partial (meta.json only)", async () => {
+  assert.equal(
+    build.status,
+    0,
+    `expected build to succeed\nstdout:\n${build.stdout}\nstderr:\n${build.stderr}`,
+  );
+
+  // Partial cache: meta.json exists but eips/ directory is missing.
+  // The light path must detect the incomplete cache and fall back to
+  // loadCache (auto-fetch) instead of misreporting EIP_NOT_FOUND.
+  const { createEipCommand } = await importEipModule();
+
+  const cacheRoot = createCacheRoot();
+  const cacheDir = path.join(cacheRoot, "cache");
+  fs.mkdirSync(cacheDir, { recursive: true });
+  writeJson(path.join(cacheDir, "meta.json"), {
+    forkcast_commit: "partial000",
+    last_updated: "2026-04-13T00:00:00.000Z",
+    version: 1,
+  });
+  // Note: eips/ directory intentionally NOT created.
+
+  const stdout = [];
+  const stderr = [];
+  const previousExitCode = process.exitCode;
+
+  const fullEip = readFixtureJson("reference-eip-7702.json");
+  const fullMeta = {
+    forkcast_commit: "full123abc",
+    last_updated: "2026-04-14T00:00:00.000Z",
+    version: 1,
+  };
+
+  try {
+    let loadCacheCalled = false;
+    const command = createEipCommand({
+      getCacheRoot: () => cacheRoot,
+      loadCache: async () => {
+        loadCacheCalled = true;
+        // Simulate auto-fetch: write the missing EIP to the cache.
+        writeJson(path.join(cacheDir, "eips", `${fullEip.id}.json`), fullEip);
+        writeJson(path.join(cacheDir, "meta.json"), fullMeta);
+        writeJson(path.join(cacheDir, "meetings-manifest.json"), []);
+        writeJson(path.join(cacheDir, "context-index.json"), {});
+        writeJson(path.join(cacheDir, "eips-index.json"), []);
+        writeJson(path.join(cacheDir, "meetings-index.json"), []);
+        return {
+          meta: fullMeta,
+          readContextIndex: async () => ({}),
+          readEipsIndex: async () => [],
+          readMeetingsIndex: async () => [],
+        };
+      },
+      stdout: {
+        write(chunk) {
+          stdout.push(String(chunk));
+          return true;
+        },
+      },
+      stderr: {
+        write(chunk) {
+          stderr.push(String(chunk));
+          return true;
+        },
+      },
+    });
+
+    await command.parseAsync(["node", "eip", "7702"], { from: "node" });
+
+    assert.ok(loadCacheCalled, "loadCache should have been called for partial cache");
+    const output = JSON.parse(stdout.join(""));
+    assert.equal(output.results[0].id, 7702);
+    assert.equal(output.source.forkcast_commit, "full123abc");
+  } finally {
+    process.exitCode = previousExitCode;
+    fs.rmSync(cacheRoot, { force: true, recursive: true });
+  }
+});
+
+test("WHI-60 light path falls back to loadCache when eips/ dir exists but requested file is missing", async () => {
+  assert.equal(
+    build.status,
+    0,
+    `expected build to succeed\nstdout:\n${build.stdout}\nstderr:\n${build.stderr}`,
+  );
+
+  // Partial cache: meta.json and eips/ both exist, but the requested
+  // EIP file is NOT in the directory (simulates interrupted fetch or
+  // empty eips dir).  The light path must NOT report EIP_NOT_FOUND;
+  // instead it should retry via loadCache.
+  const { createEipCommand } = await importEipModule();
+
+  const cacheRoot = createCacheRoot();
+  const cacheDir = path.join(cacheRoot, "cache");
+  fs.mkdirSync(path.join(cacheDir, "eips"), { recursive: true });
+  writeJson(path.join(cacheDir, "meta.json"), {
+    forkcast_commit: "partial000",
+    last_updated: "2026-04-13T00:00:00.000Z",
+    version: 1,
+  });
+  // eips/ exists but is empty — no 7702.json.
+
+  const stdout = [];
+  const stderr = [];
+  const previousExitCode = process.exitCode;
+
+  const fullEip = readFixtureJson("reference-eip-7702.json");
+  const fullMeta = {
+    forkcast_commit: "full123abc",
+    last_updated: "2026-04-14T00:00:00.000Z",
+    version: 1,
+  };
+
+  try {
+    let loadCacheCalled = false;
+    const command = createEipCommand({
+      getCacheRoot: () => cacheRoot,
+      loadCache: async () => {
+        loadCacheCalled = true;
+        writeJson(path.join(cacheDir, "eips", `${fullEip.id}.json`), fullEip);
+        writeJson(path.join(cacheDir, "meta.json"), fullMeta);
+        writeJson(path.join(cacheDir, "meetings-manifest.json"), []);
+        writeJson(path.join(cacheDir, "context-index.json"), {});
+        writeJson(path.join(cacheDir, "eips-index.json"), []);
+        writeJson(path.join(cacheDir, "meetings-index.json"), []);
+        return {
+          meta: fullMeta,
+          readContextIndex: async () => ({}),
+          readEipsIndex: async () => [],
+          readMeetingsIndex: async () => [],
+        };
+      },
+      stdout: {
+        write(chunk) {
+          stdout.push(String(chunk));
+          return true;
+        },
+      },
+      stderr: {
+        write(chunk) {
+          stderr.push(String(chunk));
+          return true;
+        },
+      },
+    });
+
+    await command.parseAsync(["node", "eip", "7702"], { from: "node" });
+
+    assert.ok(loadCacheCalled, "loadCache should have been called when EIP file was missing");
+    const output = JSON.parse(stdout.join(""));
+    assert.equal(output.results[0].id, 7702);
+    assert.equal(output.source.forkcast_commit, "full123abc");
+  } finally {
+    process.exitCode = previousExitCode;
+    fs.rmSync(cacheRoot, { force: true, recursive: true });
+  }
+});
+
+test("WHI-60 light path (no --context) still emits stale cache warning", () => {
+  assert.equal(
+    build.status,
+    0,
+    `expected build to succeed\nstdout:\n${build.stdout}\nstderr:\n${build.stderr}`,
+  );
+
+  const cacheRoot = createCacheRoot();
+
+  try {
+    seedRawCache(cacheRoot);
+
+    // Overwrite meta.json with a stale last_updated (>7 days ago).
+    writeJson(path.join(cacheRoot, "cache", "meta.json"), {
+      forkcast_commit: "stale000",
+      last_updated: "2026-03-01T00:00:00.000Z",
+      version: 1,
+    });
+
+    const result = runForkcast(["eip", "7702"], { cacheRoot });
+
+    assert.equal(
+      result.status,
+      0,
+      `expected command to succeed\nstdout:\n${result.stdout}\nstderr:\n${result.stderr}`,
+    );
+    assert.match(result.stderr, /Cache is \d+ days old/);
+  } finally {
+    fs.rmSync(cacheRoot, { force: true, recursive: true });
+  }
+});
