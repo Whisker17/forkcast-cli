@@ -1,5 +1,6 @@
 import { Command } from "commander";
 import { eipCommand } from "./commands/eip.js";
+import { eipsCommand } from "./commands/eips.js";
 import { VERSION } from "./generated/version.js";
 
 const program = new Command();
@@ -15,5 +16,6 @@ program
 // `--pretty` before or after the subcommand and still shows it in command help.
 program.option("--pretty", "Human-readable output instead of JSON");
 program.addCommand(eipCommand);
+program.addCommand(eipsCommand);
 
 await program.parseAsync();
