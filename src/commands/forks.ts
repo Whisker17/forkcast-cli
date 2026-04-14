@@ -1,8 +1,8 @@
-import fsp from "node:fs/promises";
 import { Command } from "commander";
 import { loadCache } from "../lib/cache.js";
-import { CommandError, getCommandErrorCode } from "../lib/errors.js";
-import { getCacheLayout, getCacheRoot, type WritableLike } from "../lib/fetcher.js";
+import { getCommandErrorCode } from "../lib/errors.js";
+import { loadEipsIndex } from "../lib/eips-index-loader.js";
+import { getCacheRoot, type WritableLike } from "../lib/fetcher.js";
 import { exitCodeForErrorCode, writeJsonEnvelope, writeJsonError, writePrettyError } from "../lib/output.js";
 import type { EipIndexEntry, ForkInclusionStatus, OutputEnvelope } from "../types/index.js";
 
@@ -39,7 +39,7 @@ const FORK_DEFINITIONS: ForkDefinition[] = [
     description: "Block-level Access Lists and ePBS",
   },
   {
-    name: "Hegotá",
+    name: "Hegota",
     status: "Planning",
     activationDate: null,
     description: "FOCIL SFI'd, Frame Tx CFI'd",
@@ -93,88 +93,6 @@ function getDefaultDependencies(): ForksCommandDependencies {
     stderr: process.stderr,
     stdout: process.stdout,
   };
-}
-
-// ---------------------------------------------------------------------------
-// Index validation
-// ---------------------------------------------------------------------------
-
-/**
- * Validate that the parsed eips-index.json has the expected shape.
- * Throws DATA_ERROR so the caller can treat it the same way as a corrupt or
- * missing cache (triggering a self-healing retry).
- */
-function validateEipsIndex(raw: unknown): EipIndexEntry[] {
-  if (!Array.isArray(raw)) {
-    throw new CommandError(
-      "eips-index.json has an unexpected shape (expected an array)",
-      "DATA_ERROR",
-    );
-  }
-
-  for (let i = 0; i < raw.length; i++) {
-    const entry = raw[i];
-    if (
-      entry === null
-      || typeof entry !== "object"
-      || typeof (entry as Record<string, unknown>).id !== "number"
-      || typeof (entry as Record<string, unknown>).status !== "string"
-      || !Array.isArray((entry as Record<string, unknown>).forks)
-    ) {
-      throw new CommandError(
-        `eips-index.json entry at index ${i} is missing required fields (id, status, forks)`,
-        "DATA_ERROR",
-      );
-    }
-  }
-
-  return raw as EipIndexEntry[];
-}
-
-// ---------------------------------------------------------------------------
-// Cache loading (with self-healing retry)
-// ---------------------------------------------------------------------------
-
-async function loadEipsIndex(
-  cacheRoot: string,
-  deps: ForksCommandDependencies,
-): Promise<{ loaded: Awaited<ReturnType<typeof loadCache>>; allEntries: EipIndexEntry[] }> {
-  const tryLoad = async () => {
-    const loaded = await deps.loadCache({ cacheRoot, stderr: deps.stderr });
-    const raw = await loaded.readEipsIndex();
-    const allEntries = validateEipsIndex(raw);
-    return { loaded, allEntries };
-  };
-
-  try {
-    return await tryLoad();
-  } catch (error) {
-    // Only self-heal on cache/data errors — not on user input errors or
-    // unrelated failures.
-    const code = error instanceof CommandError
-      ? error.code
-      : (error && typeof error === "object" && "code" in error
-        ? (error as { code: unknown }).code
-        : undefined);
-
-    if (code !== "NOT_CACHED" && code !== "DATA_ERROR") {
-      throw error;
-    }
-
-    // The raw cache appears to exist but is corrupt or incomplete.  Delete the
-    // cache directory so the next loadCache call sees an empty state and
-    // triggers a fresh auto-fetch.
-    const cacheDir = getCacheLayout(cacheRoot).cacheDir;
-    try {
-      await fsp.rm(cacheDir, { force: true, recursive: true });
-    } catch {
-      // Deletion is best-effort.  If it fails, tryLoad will re-throw the
-      // original error on the next attempt, giving the user an actionable
-      // message rather than a silent hang.
-    }
-
-    return await tryLoad();
-  }
 }
 
 // ---------------------------------------------------------------------------
