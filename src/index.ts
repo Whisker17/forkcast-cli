@@ -1,10 +1,12 @@
 import { Command } from "commander";
 import { decisionsCommand } from "./commands/decisions.js";
+import { diffCommand } from "./commands/diff.js";
 import { eipCommand } from "./commands/eip.js";
 import { eipsCommand } from "./commands/eips.js";
 import { forksCommand } from "./commands/forks.js";
 import { meetingsCommand } from "./commands/meetings.js";
 import { searchCommand } from "./commands/search.js";
+import { timelineCommand } from "./commands/timeline.js";
 import { updateCommand } from "./commands/update.js";
 import { VERSION } from "./generated/version.js";
 
@@ -26,6 +28,8 @@ program.addCommand(forksCommand);
 program.addCommand(meetingsCommand);
 program.addCommand(searchCommand);
 program.addCommand(decisionsCommand);
+program.addCommand(timelineCommand);
+program.addCommand(diffCommand);
 program.addCommand(updateCommand);
 
 await program.parseAsync();

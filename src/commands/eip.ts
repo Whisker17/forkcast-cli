@@ -3,6 +3,16 @@ import path from "node:path";
 import { Command } from "commander";
 import { loadCache, warnIfStale } from "../lib/cache.js";
 import { getEipById, getContextForEip } from "../lib/db.js";
+import {
+  ensureRepo,
+  findCommitBefore,
+  getEipAtCommit,
+  getRepoDirPath,
+  isGitAvailable,
+  normalizeDate,
+  repoExists,
+  GitHistoryError,
+} from "../lib/git-history.js";
 import { getCacheLayout, getCacheRoot, type WritableLike } from "../lib/fetcher.js";
 import { CommandError, getCommandErrorCode } from "../lib/errors.js";
 import { exitCodeForErrorCode, writeJsonEnvelope, writeJsonError, writePrettyError } from "../lib/output.js";
@@ -24,6 +34,9 @@ export interface EipCommandDependencies {
   getCacheRoot: () => string;
   loadCache: typeof loadCache;
   readFile: typeof fsp.readFile;
+  ensureRepo: typeof ensureRepo;
+  getRepoDirPath: (cacheRoot?: string) => string;
+  repoExists: typeof repoExists;
   stderr: WritableLike;
   stdout: WritableLike;
 }
@@ -33,6 +46,9 @@ function getDefaultDependencies(): EipCommandDependencies {
     getCacheRoot,
     loadCache,
     readFile: fsp.readFile.bind(fsp),
+    ensureRepo,
+    getRepoDirPath,
+    repoExists,
     stderr: process.stderr,
     stdout: process.stdout,
   };
@@ -241,13 +257,113 @@ async function loadMetaOrFetch(
   }
 }
 
+/**
+ * Handle the --as-of <date> path: retrieve the EIP state at a historical date
+ * using the forkcast git clone.
+ */
+async function runEipCommandAsOf(
+  eipId: number,
+  asOfRaw: string,
+  options: { pretty?: boolean; skipPull?: boolean },
+  deps: EipCommandDependencies,
+  cacheRoot: string,
+): Promise<void> {
+  // Validate and normalise the date
+  let asOf: string;
+  try {
+    asOf = normalizeDate(asOfRaw);
+  } catch (error) {
+    if (error instanceof GitHistoryError) {
+      throw new CommandError(error.message, "INVALID_INPUT", { cause: error });
+    }
+    throw error;
+  }
+
+  if (!(await isGitAvailable())) {
+    throw new CommandError(
+      "git is not installed. --as-of requires git.",
+      "FETCH_FAILED",
+    );
+  }
+
+  // Load meta for source information
+  const meta = await loadMetaOrFetch(cacheRoot, deps);
+
+  // Ensure the forkcast git repo is cloned
+  const repoDir = deps.getRepoDirPath(cacheRoot);
+  const alreadyCloned = await deps.repoExists(repoDir);
+  try {
+    await deps.ensureRepo(repoDir, { stderr: deps.stderr, skipPull: options.skipPull });
+  } catch (error) {
+    if (error instanceof GitHistoryError) {
+      throw new CommandError(error.message, "FETCH_FAILED", { cause: error });
+    }
+    throw error;
+  }
+
+  // Find the commit closest to the requested date
+  const commit = await findCommitBefore(repoDir, eipId, asOf);
+  if (!commit) {
+    throw new CommandError(
+      `No version of EIP-${eipId} found before date "${asOf}"`,
+      "EIP_NOT_FOUND",
+    );
+  }
+
+  // Read the EIP at that commit
+  const rawEip = await getEipAtCommit(repoDir, eipId, commit);
+  if (!rawEip) {
+    throw new CommandError(
+      `EIP-${eipId} did not exist at date "${asOf}" (commit ${commit.slice(0, 8)})`,
+      "EIP_NOT_FOUND",
+    );
+  }
+
+  const eip = normalizeEipForOutput(rawEip);
+
+  const envelope: OutputEnvelope<OutputEip> = {
+    query: {
+      command: "eip",
+      filters: { id: eipId, asOf, commit },
+    },
+    results: [eip],
+    count: 1,
+    source: {
+      forkcast_commit: commit,
+      last_updated: meta.last_updated,
+    },
+    ...(!alreadyCloned
+      ? { warning: "Forkcast git repo was cloned during this request. Future --as-of queries will be faster." }
+      : {}),
+  };
+
+  if (options.pretty) {
+    deps.stdout.write(formatPrettyEip(eip, envelope.source));
+    deps.stdout.write(`\n[Historical snapshot as of ${asOf}, commit ${commit.slice(0, 8)}]\n`);
+    return;
+  }
+
+  writeJsonEnvelope(envelope, deps.stdout);
+}
+
 async function runEipCommand(
   eipNumberArg: string,
-  options: { context?: boolean; pretty?: boolean },
+  options: { context?: boolean; pretty?: boolean; asOf?: string; skipPull?: boolean },
   deps: EipCommandDependencies,
 ) {
   const cacheRoot = deps.getCacheRoot();
   const eipId = parseEipNumber(eipNumberArg);
+
+  // --as-of: time-travel path using git history
+  if (options.asOf !== undefined) {
+    if (options.context) {
+      throw new CommandError(
+        "--context is not supported with --as-of (historical snapshots do not include meeting context)",
+        "INVALID_INPUT",
+      );
+    }
+    return runEipCommandAsOf(eipId, options.asOf, options, deps, cacheRoot);
+  }
 
   let meta: CacheMeta;
   let context: ContextEntry[] | undefined;
@@ -345,16 +461,18 @@ async function runEipCommand(
 
 async function handleEipCommand(
   eipNumberArg: string,
-  _options: { context?: boolean; pretty?: boolean },
+  _options: { context?: boolean; pretty?: boolean; asOf?: string; skipPull?: boolean },
   command: Command,
   deps: EipCommandDependencies,
 ) {
-  const parsedOptions = command.optsWithGlobals<{ context?: boolean; pretty?: boolean }>();
+  const parsedOptions = command.optsWithGlobals<{ context?: boolean; pretty?: boolean; asOf?: string; skipPull?: boolean }>();
 
   try {
     await runEipCommand(eipNumberArg, {
       context: parsedOptions.context === true,
       pretty: parsedOptions.pretty === true,
+      asOf: parsedOptions.asOf,
+      skipPull: parsedOptions.skipPull === true,
     }, deps);
   } catch (error) {
     const code = getCommandErrorCode(error);
@@ -384,6 +502,8 @@ export function createEipCommand(
     .description("Look up a single EIP by number")
     .argument("<number>", "EIP number")
     .option("--context", "Include related meeting mentions")
+    .option("--as-of <date>", "Show EIP state at a historical date (requires git clone)")
+    .option("--skip-pull", "Skip git pull (use existing clone)")
     .option("--pretty", "Human-readable output instead of JSON")
     .action((eipNumberArg, _options, command) => handleEipCommand(eipNumberArg, _options, command, deps));
 }
