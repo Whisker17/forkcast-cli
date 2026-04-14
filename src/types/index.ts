@@ -86,6 +86,62 @@ export interface Eip {
   tradeoffs: string[] | null;
 }
 
+export interface OutputForkStatusHistoryEntry extends Omit<ForkStatusHistoryEntry, "timestamp"> {
+  timestamp: number | null;
+}
+
+export interface OutputForkChampion extends Omit<ForkChampion, "discord" | "email" | "telegram"> {
+  discord: string | null;
+  email: string | null;
+  telegram: string | null;
+}
+
+export interface OutputPresentationHistoryEntry {
+  type: string;
+  // Exactly one of call/link is non-null in normalized output.
+  call: string | null;
+  date: string;
+  link: string | null;
+}
+
+export interface OutputForkRelationship extends Omit<
+  ForkRelationship,
+  "champions" | "isHeadliner" | "presentationHistory" | "statusHistory" | "wasHeadlinerCandidate"
+> {
+  champions: OutputForkChampion[] | null;
+  isHeadliner: boolean | null;
+  presentationHistory: OutputPresentationHistoryEntry[] | null;
+  statusHistory: OutputForkStatusHistoryEntry[];
+  wasHeadlinerCandidate: boolean | null;
+}
+
+export interface OutputEip extends Omit<
+  Eip,
+  | "benefits"
+  | "category"
+  | "discussionLink"
+  | "forkRelationships"
+  | "layer"
+  | "laymanDescription"
+  | "northStarAlignment"
+  | "northStars"
+  | "reviewer"
+  | "stakeholderImpacts"
+  | "tradeoffs"
+> {
+  benefits: string[] | null;
+  category: string | null;
+  discussionLink: string | null;
+  forkRelationships: OutputForkRelationship[];
+  layer: "EL" | "CL" | null;
+  laymanDescription: string | null;
+  northStarAlignment: Record<string, DescriptionEntry> | null;
+  northStars: string[] | null;
+  reviewer: string | null;
+  stakeholderImpacts: Record<string, DescriptionEntry> | null;
+  tradeoffs: string[] | null;
+}
+
 export interface MeetingHighlight {
   timestamp: string;
   highlight: string;

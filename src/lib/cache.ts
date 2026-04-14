@@ -511,14 +511,14 @@ async function indexesNeedRebuild(paths: CachePaths) {
   return (await getFileMtime(paths.meetingsManifestPath)) > meetingsIndexMtime;
 }
 
-function warnIfStale(meta: CacheMeta, stderr: WritableLike) {
+export function warnIfStale(meta: CacheMeta, stderr: WritableLike) {
   const ageMs = Date.now() - Date.parse(meta.last_updated);
   if (!Number.isFinite(ageMs) || ageMs <= CACHE_STALE_MS) {
     return;
   }
 
   const ageDays = Math.floor(ageMs / (24 * 60 * 60 * 1000));
-  stderr.write(`Cache is ${ageDays} days old. Run \`forkcast update\` to refresh.\n`);
+  stderr.write(`Cache is ${ageDays} days old. Consider refreshing the cache.\n`);
 }
 
 function createLazyReader<T>(filePath: string, label: string) {

@@ -292,7 +292,7 @@ test("WHI-59 loadCache auto-fetches missing data and warns when the cache is sta
     assert.equal(fetchCalls[0].cacheRoot, cacheRoot);
     assert.equal(fetchCalls[0].stderr, stderrSink);
     assert.equal(loaded.meta.forkcast_commit, "fetched789");
-    assert.match(stderr.join(""), /Cache is \d+ days old\. Run `forkcast update` to refresh\./);
+    assert.match(stderr.join(""), /Cache is \d+ days old\. Consider refreshing the cache\./);
     assert.equal((await loaded.readEipsIndex()).length, 3);
     assert.equal((await loaded.readMeetingsIndex())[0].dirName, "2026-04-09_234");
     assert.ok(fs.existsSync(path.join(cacheRoot, "cache", "context-index.json")));
