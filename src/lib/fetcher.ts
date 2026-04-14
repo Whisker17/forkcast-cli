@@ -41,6 +41,12 @@ export interface FetchEipDataOptions {
   archiveUrl?: string;
   cacheRoot?: string;
   commitUrl?: string;
+  /**
+   * When provided, skip the `getForkcastCommit()` API call and use this SHA
+   * directly. Saves one GitHub API request when the caller has already fetched
+   * the latest commit (e.g. `forkcast update` smart-update path).
+   */
+  knownCommit?: string;
   pagesBaseUrl?: string;
   requestTimeoutMs?: number;
   stderr?: WritableLike;
@@ -643,22 +649,26 @@ export async function fetchEipData(options: FetchEipDataOptions = {}): Promise<F
 
     let commit: string;
 
-    try {
-      commit = await getForkcastCommit(commitUrl, requestTimeoutMs);
-    } catch (error) {
-      if (
-        error instanceof FetcherError &&
-        error.code === "FETCH_FAILED" &&
-        /rate limit/i.test(error.message) &&
-        (await hasExistingCache(paths))
-      ) {
-        stderr.write("GitHub API rate limit reached; using existing forkcast cache.\n");
-        return {
-          meta: await readMeta(paths.metaPath),
-          meetings: await readMeetingsManifestFallback(paths, stderr),
-        };
+    if (options.knownCommit !== undefined && options.knownCommit.length > 0) {
+      commit = options.knownCommit;
+    } else {
+      try {
+        commit = await getForkcastCommit(commitUrl, requestTimeoutMs);
+      } catch (error) {
+        if (
+          error instanceof FetcherError &&
+          error.code === "FETCH_FAILED" &&
+          /rate limit/i.test(error.message) &&
+          (await hasExistingCache(paths))
+        ) {
+          stderr.write("GitHub API rate limit reached; using existing forkcast cache.\n");
+          return {
+            meta: await readMeta(paths.metaPath),
+            meetings: await readMeetingsManifestFallback(paths, stderr),
+          };
+        }
+        throw error;
       }
-      throw error;
     }
 
     const meta: CacheMeta = {

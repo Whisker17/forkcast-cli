@@ -3,6 +3,7 @@ import { eipCommand } from "./commands/eip.js";
 import { eipsCommand } from "./commands/eips.js";
 import { forksCommand } from "./commands/forks.js";
 import { meetingsCommand } from "./commands/meetings.js";
+import { updateCommand } from "./commands/update.js";
 import { VERSION } from "./generated/version.js";
 
 const program = new Command();
@@ -21,5 +22,6 @@ program.addCommand(eipCommand);
 program.addCommand(eipsCommand);
 program.addCommand(forksCommand);
 program.addCommand(meetingsCommand);
+program.addCommand(updateCommand);
 
 await program.parseAsync();
