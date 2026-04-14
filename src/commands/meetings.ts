@@ -6,6 +6,7 @@ import { CommandError, getCommandErrorCode } from "../lib/errors.js";
 import { fetchTldr, getCacheLayout, getCacheRoot, type WritableLike } from "../lib/fetcher.js";
 import { exitCodeForErrorCode, writeJsonEnvelope, writeJsonError, writePrettyError } from "../lib/output.js";
 import type { MeetingIndexEntry, MeetingTldr, OutputEnvelope } from "../types/index.js";
+import type { PmMeetingNote } from "../lib/pm-parser.js";
 
 // ---------------------------------------------------------------------------
 // Result types
@@ -19,8 +20,19 @@ interface TldrSummary {
   targetCount: number;
 }
 
+interface PmNoteSummary {
+  title: string;
+  date: string | null;
+  moderator: string | null;
+  attendeeCount: number;
+  decisionCount: number;
+  summaryItemCount: number;
+  eipReferenceCount: number;
+}
+
 interface MeetingResult extends MeetingIndexEntry {
   tldrSummary: TldrSummary | null;
+  pmNoteSummary: PmNoteSummary | null;
 }
 
 // ---------------------------------------------------------------------------
@@ -296,8 +308,32 @@ async function loadTldrSummary(
 }
 
 // ---------------------------------------------------------------------------
-// Pretty formatting
+// PM note summary loading
 // ---------------------------------------------------------------------------
+
+function parsePmNoteSummary(note: PmMeetingNote): PmNoteSummary {
+  return {
+    title: note.title,
+    date: note.date,
+    moderator: note.moderator,
+    attendeeCount: note.attendees.length,
+    decisionCount: note.decisions.length,
+    summaryItemCount: note.summaryItems.length,
+    eipReferenceCount: note.eipReferences.length,
+  };
+}
+
+async function loadPmNoteSummary(
+  entry: MeetingIndexEntry,
+  loaded: Awaited<ReturnType<typeof loadCache>>,
+): Promise<PmNoteSummary | null> {
+  try {
+    const note = await loaded.readPmNote(entry.type, entry.dirName);
+    return note ? parsePmNoteSummary(note) : null;
+  } catch {
+    return null;
+  }
+}
 
 function formatPrettyMeetings(entries: MeetingResult[]): string {
   const typeWidth = Math.max("Type".length, ...entries.map((e) => e.type.length));
@@ -378,7 +414,12 @@ async function runMeetingsCommand(
       const tldrSummary = entry.tldrAvailable
         ? await loadTldrSummary(tldrsDir, entry, deps.fetchTldr)
         : null;
-      return { ...entry, tldrSummary };
+
+      const pmNoteSummary = entry.pmNoteAvailable
+        ? await loadPmNoteSummary(entry, loaded)
+        : null;
+
+      return { ...entry, tldrSummary, pmNoteSummary };
     }),
   );
 

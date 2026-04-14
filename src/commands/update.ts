@@ -3,6 +3,7 @@ import https from "node:https";
 import { Command } from "commander";
 import { buildCache } from "../lib/cache.js";
 import { fetchEipData, getCacheLayout, getCacheRoot, type WritableLike } from "../lib/fetcher.js";
+import { fetchPmData, readPmMeta, type PmFetchOptions } from "../lib/pm-fetcher.js";
 import { CommandError, getCommandErrorCode } from "../lib/errors.js";
 import { exitCodeForErrorCode, writeJsonEnvelope, writeJsonError, writePrettyError } from "../lib/output.js";
 import type { CacheMeta, OutputEnvelope } from "../types/index.js";
@@ -15,6 +16,7 @@ export interface UpdateResultUpToDate {
   status: "up_to_date";
   commit: string;
   lastUpdated: string;
+  pmCommit?: string;
 }
 
 export interface UpdateResultUpdated {
@@ -23,6 +25,8 @@ export interface UpdateResultUpdated {
   newCommit: string;
   eipsCount: number;
   meetingsCount: number;
+  pmCommit?: string;
+  pmNoteCount?: number;
 }
 
 export type UpdateResult = UpdateResultUpToDate | UpdateResultUpdated;
@@ -34,24 +38,31 @@ export type UpdateResult = UpdateResultUpToDate | UpdateResultUpdated;
 export interface UpdateCommandDependencies {
   buildCache: typeof buildCache;
   fetchEipData: typeof fetchEipData;
+  fetchPmData: typeof fetchPmData;
   getCacheRoot: () => string;
   getLatestCommit: (timeoutMs?: number) => Promise<string | null>;
+  getLatestPmCommit: (timeoutMs?: number) => Promise<string | null>;
   readMeta: (metaPath: string) => Promise<CacheMeta | null>;
   stderr: WritableLike;
   stdout: WritableLike;
 }
 
 const GITHUB_COMMIT_URL = "https://api.github.com/repos/ethereum/forkcast/commits/main";
+const GITHUB_PM_COMMIT_URL = "https://api.github.com/repos/ethereum/pm/commits/main";
 const DEFAULT_REQUEST_TIMEOUT_MS = 15_000;
 
 /**
- * Fetch the latest commit SHA from the GitHub API.
+ * Fetch the latest commit SHA from the given GitHub API URL.
  * Returns `null` when the API rate-limits us (HTTP 403).
  * Throws `CommandError` on network/data errors.
  */
-async function fetchLatestCommit(timeoutMs = DEFAULT_REQUEST_TIMEOUT_MS): Promise<string | null> {
+async function fetchLatestCommitFromUrl(
+  commitUrl: string,
+  label: string,
+  timeoutMs = DEFAULT_REQUEST_TIMEOUT_MS,
+): Promise<string | null> {
   return new Promise((resolve, reject) => {
-    const url = new URL(GITHUB_COMMIT_URL);
+    const url = new URL(commitUrl);
 
     let settled = false;
 
@@ -88,7 +99,7 @@ async function fetchLatestCommit(timeoutMs = DEFAULT_REQUEST_TIMEOUT_MS): Promis
           res.resume();
           settleReject(
             new CommandError(
-              `GitHub API returned HTTP ${statusCode} while fetching latest commit`,
+              `GitHub API returned HTTP ${statusCode} while fetching ${label} latest commit`,
               "FETCH_FAILED",
             ),
           );
@@ -104,7 +115,7 @@ async function fetchLatestCommit(timeoutMs = DEFAULT_REQUEST_TIMEOUT_MS): Promis
         res.on("error", (error) => {
           settleReject(
             new CommandError(
-              `Network error while fetching latest commit: ${error.message}`,
+              `Network error while fetching ${label} latest commit: ${error.message}`,
               "FETCH_FAILED",
               { cause: error },
             ),
@@ -115,7 +126,7 @@ async function fetchLatestCommit(timeoutMs = DEFAULT_REQUEST_TIMEOUT_MS): Promis
           if (!res.complete) {
             settleReject(
               new CommandError(
-                "Response closed before completion while fetching latest commit",
+                `Response closed before completion while fetching ${label} latest commit`,
                 "FETCH_FAILED",
               ),
             );
@@ -129,7 +140,7 @@ async function fetchLatestCommit(timeoutMs = DEFAULT_REQUEST_TIMEOUT_MS): Promis
           } catch (error) {
             settleReject(
               new CommandError(
-                `Invalid JSON returned by GitHub API: ${error instanceof Error ? error.message : String(error)}`,
+                `Invalid JSON returned by GitHub API (${label}): ${error instanceof Error ? error.message : String(error)}`,
                 "DATA_ERROR",
                 { cause: error },
               ),
@@ -140,7 +151,7 @@ async function fetchLatestCommit(timeoutMs = DEFAULT_REQUEST_TIMEOUT_MS): Promis
           if (typeof payload.sha !== "string" || payload.sha.length === 0) {
             settleReject(
               new CommandError(
-                "GitHub API response did not include a commit SHA",
+                `GitHub API response (${label}) did not include a commit SHA`,
                 "DATA_ERROR",
               ),
             );
@@ -155,7 +166,7 @@ async function fetchLatestCommit(timeoutMs = DEFAULT_REQUEST_TIMEOUT_MS): Promis
     req.setTimeout(timeoutMs, () => {
       req.destroy(
         new CommandError(
-          `Request timed out after ${timeoutMs}ms while fetching latest commit`,
+          `Request timed out after ${timeoutMs}ms while fetching ${label} latest commit`,
           "FETCH_FAILED",
         ),
       );
@@ -168,7 +179,7 @@ async function fetchLatestCommit(timeoutMs = DEFAULT_REQUEST_TIMEOUT_MS): Promis
       }
       settleReject(
         new CommandError(
-          `Network error while fetching latest commit: ${error.message}`,
+          `Network error while fetching ${label} latest commit: ${error.message}`,
           "FETCH_FAILED",
           { cause: error },
         ),
@@ -177,6 +188,24 @@ async function fetchLatestCommit(timeoutMs = DEFAULT_REQUEST_TIMEOUT_MS): Promis
 
     req.end();
   });
+}
+
+/**
+ * Fetch the latest commit SHA from the ethereum/forkcast GitHub API.
+ * Returns `null` when the API rate-limits us (HTTP 403).
+ * Throws `CommandError` on network/data errors.
+ */
+async function fetchLatestCommit(timeoutMs = DEFAULT_REQUEST_TIMEOUT_MS): Promise<string | null> {
+  return fetchLatestCommitFromUrl(GITHUB_COMMIT_URL, "forkcast", timeoutMs);
+}
+
+/**
+ * Fetch the latest commit SHA from the ethereum/pm GitHub API.
+ * Returns `null` when the API rate-limits us (HTTP 403).
+ * Throws `CommandError` on network/data errors.
+ */
+async function fetchLatestPmCommit(timeoutMs = DEFAULT_REQUEST_TIMEOUT_MS): Promise<string | null> {
+  return fetchLatestCommitFromUrl(GITHUB_PM_COMMIT_URL, "pm", timeoutMs);
 }
 
 async function readMetaFile(metaPath: string, stderr?: WritableLike): Promise<CacheMeta | null> {
@@ -206,8 +235,10 @@ function getDefaultDependencies(): UpdateCommandDependencies {
   return {
     buildCache,
     fetchEipData,
+    fetchPmData,
     getCacheRoot,
     getLatestCommit: fetchLatestCommit,
+    getLatestPmCommit: fetchLatestPmCommit,
     readMeta: (metaPath) => readMetaFile(metaPath, process.stderr),
     stderr: process.stderr,
     stdout: process.stdout,
@@ -217,6 +248,53 @@ function getDefaultDependencies(): UpdateCommandDependencies {
 // ---------------------------------------------------------------------------
 // Core logic
 // ---------------------------------------------------------------------------
+
+/**
+ * Try to update pm data if the latest commit is different from what's cached.
+ * Returns the pm commit that ended up in cache (may be the same as before if rate-limited).
+ * Never throws — gracefully handles rate-limits and network errors by logging to stderr.
+ */
+async function tryUpdatePm(
+  cacheRoot: string,
+  deps: UpdateCommandDependencies,
+): Promise<{ pmCommit: string | null; pmNoteCount: number }> {
+  const pmMeta = await readPmMeta(cacheRoot);
+
+  let latestPmCommit: string | null;
+  try {
+    latestPmCommit = await deps.getLatestPmCommit();
+  } catch (error) {
+    deps.stderr.write(
+      `Warning: could not check pm repo commit: ${error instanceof Error ? error.message : String(error)}\n`,
+    );
+    return { pmCommit: pmMeta?.pm_commit ?? null, pmNoteCount: 0 };
+  }
+
+  if (latestPmCommit === null) {
+    // Rate-limited — skip pm update
+    deps.stderr.write("GitHub API rate limited for pm repo; skipping pm update.\n");
+    return { pmCommit: pmMeta?.pm_commit ?? null, pmNoteCount: 0 };
+  }
+
+  if (pmMeta && pmMeta.pm_commit === latestPmCommit) {
+    // Already up to date
+    return { pmCommit: pmMeta.pm_commit, pmNoteCount: 0 };
+  }
+
+  // Fetch pm data
+  try {
+    const pmFetchResult = await deps.fetchPmData({ cacheRoot, stderr: deps.stderr });
+    return {
+      pmCommit: pmFetchResult.commit,
+      pmNoteCount: pmFetchResult.elMeetings + pmFetchResult.clMeetings + pmFetchResult.breakoutMeetings,
+    };
+  } catch (error) {
+    deps.stderr.write(
+      `Warning: failed to fetch pm data: ${error instanceof Error ? error.message : String(error)}\n`,
+    );
+    return { pmCommit: pmMeta?.pm_commit ?? null, pmNoteCount: 0 };
+  }
+}
 
 async function runUpdateCommand(
   options: { force?: boolean; pretty?: boolean },
@@ -234,7 +312,10 @@ async function runUpdateCommand(
       deps.stderr.write("Forcing full cache refresh…\n");
     }
 
-    const fetchResult = await deps.fetchEipData({ cacheRoot, stderr: deps.stderr });
+    const [fetchResult, pmUpdate] = await Promise.all([
+      deps.fetchEipData({ cacheRoot, stderr: deps.stderr }),
+      tryUpdatePm(cacheRoot, deps),
+    ]);
     const buildResult = await deps.buildCache({ cacheRoot });
 
     const oldCommit = existingMeta?.forkcast_commit ?? null;
@@ -248,6 +329,7 @@ async function runUpdateCommand(
         status: "up_to_date",
         commit: newCommit,
         lastUpdated: fetchResult.meta.last_updated,
+        ...(pmUpdate.pmCommit ? { pmCommit: pmUpdate.pmCommit } : {}),
       };
 
       const envelope: OutputEnvelope<UpdateResultUpToDate> = {
@@ -257,6 +339,7 @@ async function runUpdateCommand(
         source: {
           forkcast_commit: newCommit,
           last_updated: fetchResult.meta.last_updated,
+          ...(pmUpdate.pmCommit ? { pm_commit: pmUpdate.pmCommit } : {}),
         },
         warning: "Force-fetch returned existing cache (possible rate limit); no new data available.",
       };
@@ -278,6 +361,8 @@ async function runUpdateCommand(
       newCommit,
       eipsCount: buildResult.eipCount,
       meetingsCount: buildResult.meetingCount,
+      ...(pmUpdate.pmCommit ? { pmCommit: pmUpdate.pmCommit } : {}),
+      ...(pmUpdate.pmNoteCount > 0 ? { pmNoteCount: pmUpdate.pmNoteCount } : {}),
     };
 
     const envelope: OutputEnvelope<UpdateResultUpdated> = {
@@ -287,13 +372,16 @@ async function runUpdateCommand(
       source: {
         forkcast_commit: fetchResult.meta.forkcast_commit,
         last_updated: fetchResult.meta.last_updated,
+        ...(pmUpdate.pmCommit ? { pm_commit: pmUpdate.pmCommit } : {}),
       },
     };
 
     if (options.pretty) {
       deps.stdout.write(
         `Updated: ${result.oldCommit ?? "(none)"} → ${result.newCommit}\n`
-        + `EIPs: ${result.eipsCount}, meetings: ${result.meetingsCount}\n`,
+        + `EIPs: ${result.eipsCount}, meetings: ${result.meetingsCount}`
+        + (result.pmNoteCount !== undefined ? `, pm notes: ${result.pmNoteCount}` : "")
+        + "\n",
       );
       return;
     }
@@ -302,8 +390,11 @@ async function runUpdateCommand(
     return;
   }
 
-  // Smart update path: check the latest commit first.
-  const latestCommit = await deps.getLatestCommit();
+  // Smart update path: check the latest commits first (forkcast + pm).
+  const [latestCommit, pmUpdate] = await Promise.all([
+    deps.getLatestCommit(),
+    tryUpdatePm(cacheRoot, deps),
+  ]);
 
   if (latestCommit === null) {
     // Rate-limited — warn and exit cleanly.
@@ -315,7 +406,11 @@ async function runUpdateCommand(
         results: [],
         count: 0,
         source: existingMeta
-          ? { forkcast_commit: existingMeta.forkcast_commit, last_updated: existingMeta.last_updated }
+          ? {
+            forkcast_commit: existingMeta.forkcast_commit,
+            last_updated: existingMeta.last_updated,
+            ...(pmUpdate.pmCommit ? { pm_commit: pmUpdate.pmCommit } : {}),
+          }
           : { forkcast_commit: "unknown", last_updated: "unknown" },
         warning: "GitHub API rate limited. Try again later.",
       };
@@ -325,11 +420,17 @@ async function runUpdateCommand(
   }
 
   if (existingMeta && existingMeta.forkcast_commit === latestCommit) {
-    // Already up to date.
+    // Forkcast is already up to date; pm may have been updated above
+    const needsBuildForPm = pmUpdate.pmNoteCount > 0;
+    if (needsBuildForPm) {
+      await deps.buildCache({ cacheRoot });
+    }
+
     const result: UpdateResultUpToDate = {
       status: "up_to_date",
       commit: existingMeta.forkcast_commit,
       lastUpdated: existingMeta.last_updated,
+      ...(pmUpdate.pmCommit ? { pmCommit: pmUpdate.pmCommit } : {}),
     };
 
     const envelope: OutputEnvelope<UpdateResultUpToDate> = {
@@ -339,6 +440,7 @@ async function runUpdateCommand(
       source: {
         forkcast_commit: existingMeta.forkcast_commit,
         last_updated: existingMeta.last_updated,
+        ...(pmUpdate.pmCommit ? { pm_commit: pmUpdate.pmCommit } : {}),
       },
     };
 
@@ -373,6 +475,8 @@ async function runUpdateCommand(
     newCommit: fetchResult.meta.forkcast_commit,
     eipsCount: buildResult.eipCount,
     meetingsCount: buildResult.meetingCount,
+    ...(pmUpdate.pmCommit ? { pmCommit: pmUpdate.pmCommit } : {}),
+    ...(pmUpdate.pmNoteCount > 0 ? { pmNoteCount: pmUpdate.pmNoteCount } : {}),
   };
 
   const envelope: OutputEnvelope<UpdateResultUpdated> = {
@@ -382,13 +486,16 @@ async function runUpdateCommand(
     source: {
       forkcast_commit: fetchResult.meta.forkcast_commit,
       last_updated: fetchResult.meta.last_updated,
+      ...(pmUpdate.pmCommit ? { pm_commit: pmUpdate.pmCommit } : {}),
     },
   };
 
   if (options.pretty) {
     deps.stdout.write(
       `Updated: ${result.oldCommit ?? "(none)"} → ${result.newCommit}\n`
-      + `EIPs: ${result.eipsCount}, meetings: ${result.meetingsCount}\n`,
+      + `EIPs: ${result.eipsCount}, meetings: ${result.meetingsCount}`
+      + (result.pmNoteCount !== undefined ? `, pm notes: ${result.pmNoteCount}` : "")
+      + "\n",
     );
     return;
   }
