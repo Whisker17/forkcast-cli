@@ -261,3 +261,59 @@ export interface PmMeta {
   last_updated: string;
   version: number;
 }
+
+// ---------------------------------------------------------------------------
+// Temporal query types (WHI-69)
+// ---------------------------------------------------------------------------
+
+export interface EipHistoryEntry {
+  /** Full commit SHA. */
+  commit: string;
+  /** ISO date string from git log (e.g. "2023-03-15T10:20:30Z"). */
+  date: string;
+  author: string;
+  message: string;
+  /** Human-readable summary of what changed (computed from diff). */
+  summary?: string;
+}
+
+export type TimelineEntryType = "git_commit" | "meeting_mention" | "status_change";
+
+export interface TimelineEntry {
+  date: string;
+  type: TimelineEntryType;
+  /** Present for git_commit entries. */
+  commit?: string;
+  author?: string;
+  message?: string;
+  /** Present for meeting_mention entries. */
+  meeting?: string;
+  meetingType?: string;
+  /** Present for status_change entries. */
+  fromStatus?: string;
+  toStatus?: string;
+  fork?: string;
+}
+
+export interface EipTimeline {
+  eipId: number;
+  title: string;
+  entries: TimelineEntry[];
+}
+
+export interface EipDiffEntry {
+  eipId: number;
+  title: string;
+  /** Inclusion status in the fork before the start date (null if not in fork). */
+  inclusionBefore: string | null;
+  /** Inclusion status in the fork after the end date (null if not in fork). */
+  inclusionAfter: string | null;
+  /** EIP lifecycle status before the start date. */
+  statusBefore: string;
+  /** EIP lifecycle status after the end date. */
+  statusAfter: string;
+  /** True if the EIP was added to the fork between the two dates. */
+  added: boolean;
+  /** True if the EIP was removed from the fork between the two dates. */
+  removed: boolean;
+}

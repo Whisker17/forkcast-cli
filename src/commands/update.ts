@@ -4,6 +4,12 @@ import { Command } from "commander";
 import { buildCache } from "../lib/cache.js";
 import { fetchEipData, getCacheLayout, getCacheRoot, type WritableLike } from "../lib/fetcher.js";
 import { fetchPmData, readPmMeta, type PmFetchOptions } from "../lib/pm-fetcher.js";
+import {
+  ensureRepo,
+  getRepoDirPath,
+  repoExists,
+  GitHistoryError,
+} from "../lib/git-history.js";
 import { CommandError, getCommandErrorCode } from "../lib/errors.js";
 import { exitCodeForErrorCode, writeJsonEnvelope, writeJsonError, writePrettyError } from "../lib/output.js";
 import type { CacheMeta, OutputEnvelope } from "../types/index.js";
@@ -17,6 +23,8 @@ export interface UpdateResultUpToDate {
   commit: string;
   lastUpdated: string;
   pmCommit?: string;
+  /** True when the forkcast git repo was cloned/updated for temporal queries. */
+  repoCloned?: boolean;
 }
 
 export interface UpdateResultUpdated {
@@ -27,6 +35,8 @@ export interface UpdateResultUpdated {
   meetingsCount: number;
   pmCommit?: string;
   pmNoteCount?: number;
+  /** True when the forkcast git repo was cloned/updated for temporal queries. */
+  repoCloned?: boolean;
 }
 
 export type UpdateResult = UpdateResultUpToDate | UpdateResultUpdated;
@@ -43,6 +53,8 @@ export interface UpdateCommandDependencies {
   getLatestCommit: (timeoutMs?: number) => Promise<string | null>;
   getLatestPmCommit: (timeoutMs?: number) => Promise<string | null>;
   readMeta: (metaPath: string) => Promise<CacheMeta | null>;
+  ensureRepo: typeof ensureRepo;
+  getRepoDirPath: (cacheRoot?: string) => string;
   stderr: WritableLike;
   stdout: WritableLike;
 }
@@ -240,6 +252,8 @@ function getDefaultDependencies(): UpdateCommandDependencies {
     getLatestCommit: fetchLatestCommit,
     getLatestPmCommit: fetchLatestPmCommit,
     readMeta: (metaPath) => readMetaFile(metaPath, process.stderr),
+    ensureRepo,
+    getRepoDirPath,
     stderr: process.stderr,
     stdout: process.stdout,
   };
@@ -297,7 +311,7 @@ async function tryUpdatePm(
 }
 
 async function runUpdateCommand(
-  options: { force?: boolean; pretty?: boolean },
+  options: { force?: boolean; clone?: boolean; pretty?: boolean },
   deps: UpdateCommandDependencies,
 ) {
   const cacheRoot = deps.getCacheRoot();
@@ -305,6 +319,29 @@ async function runUpdateCommand(
 
   // Read existing meta (if any).
   const existingMeta = await deps.readMeta(layout.metaPath);
+
+  // --clone: clone or update the forkcast git repo for temporal queries
+  let repoCloned = false;
+  if (options.clone) {
+    const repoDir = deps.getRepoDirPath(cacheRoot);
+    const alreadyExists = await repoExists(repoDir);
+    if (options.pretty) {
+      deps.stderr.write(alreadyExists ? "Updating forkcast git repo…\n" : "Cloning forkcast git repo…\n");
+    }
+    try {
+      await deps.ensureRepo(repoDir, { stderr: deps.stderr });
+      repoCloned = true;
+      if (options.pretty) {
+        deps.stderr.write("Forkcast git repo ready.\n");
+      }
+    } catch (error) {
+      if (error instanceof GitHistoryError) {
+        deps.stderr.write(`Warning: failed to clone/update git repo: ${error.message}\n`);
+      } else {
+        deps.stderr.write(`Warning: failed to clone/update git repo: ${error instanceof Error ? error.message : String(error)}\n`);
+      }
+    }
+  }
 
   if (options.force) {
     // Force path: fetch and rebuild regardless of current commit.
@@ -330,6 +367,7 @@ async function runUpdateCommand(
         commit: newCommit,
         lastUpdated: fetchResult.meta.last_updated,
         ...(pmUpdate.pmCommit ? { pmCommit: pmUpdate.pmCommit } : {}),
+        ...(repoCloned ? { repoCloned: true } : {}),
       };
 
       const envelope: OutputEnvelope<UpdateResultUpToDate> = {
@@ -363,6 +401,7 @@ async function runUpdateCommand(
       meetingsCount: buildResult.meetingCount,
       ...(pmUpdate.pmCommit ? { pmCommit: pmUpdate.pmCommit } : {}),
       ...(pmUpdate.pmNoteCount > 0 ? { pmNoteCount: pmUpdate.pmNoteCount } : {}),
+      ...(repoCloned ? { repoCloned: true } : {}),
     };
 
     const envelope: OutputEnvelope<UpdateResultUpdated> = {
@@ -431,6 +470,7 @@ async function runUpdateCommand(
       commit: existingMeta.forkcast_commit,
       lastUpdated: existingMeta.last_updated,
       ...(pmUpdate.pmCommit ? { pmCommit: pmUpdate.pmCommit } : {}),
+      ...(repoCloned ? { repoCloned: true } : {}),
     };
 
     const envelope: OutputEnvelope<UpdateResultUpToDate> = {
@@ -477,6 +517,7 @@ async function runUpdateCommand(
     meetingsCount: buildResult.meetingCount,
     ...(pmUpdate.pmCommit ? { pmCommit: pmUpdate.pmCommit } : {}),
     ...(pmUpdate.pmNoteCount > 0 ? { pmNoteCount: pmUpdate.pmNoteCount } : {}),
+    ...(repoCloned ? { repoCloned: true } : {}),
   };
 
   const envelope: OutputEnvelope<UpdateResultUpdated> = {
@@ -508,16 +549,17 @@ async function runUpdateCommand(
 // ---------------------------------------------------------------------------
 
 async function handleUpdateCommand(
-  _options: { force?: boolean; pretty?: boolean },
+  _options: { force?: boolean; clone?: boolean; pretty?: boolean },
   command: Command,
   deps: UpdateCommandDependencies,
 ) {
-  const parsedOptions = command.optsWithGlobals<{ force?: boolean; pretty?: boolean }>();
+  const parsedOptions = command.optsWithGlobals<{ force?: boolean; clone?: boolean; pretty?: boolean }>();
 
   try {
     await runUpdateCommand(
       {
         force: parsedOptions.force === true,
+        clone: parsedOptions.clone === true,
         pretty: parsedOptions.pretty === true,
       },
       deps,
@@ -550,6 +592,7 @@ export function createUpdateCommand(
   return new Command("update")
     .description("Check for new forkcast data and refresh the local cache if updates are available")
     .option("--force", "Force a full cache refresh regardless of current commit")
+    .option("--clone", "Clone or update the forkcast git repo (required for --as-of, timeline, diff commands)")
     .option("--pretty", "Human-readable output instead of JSON")
     .action((_options, command) => handleUpdateCommand(_options, command, deps));
 }
