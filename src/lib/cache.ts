@@ -7,6 +7,16 @@ import {
   type FetchEipDataResult,
   type WritableLike,
 } from "./fetcher.js";
+import {
+  getPmCachePaths,
+  readPmMeta,
+} from "./pm-fetcher.js";
+import {
+  parsePmMeeting,
+  shouldSkipFile,
+  type PmMeetingNote,
+  type PmMeetingType,
+} from "./pm-parser.js";
 import type {
   CacheMeta,
   ContextEntry,
@@ -30,6 +40,7 @@ export interface BuildCacheResult {
   eipCount: number;
   contextKeyCount: number;
   meetingCount: number;
+  pmNoteCount: number;
 }
 
 export interface LoadCacheOptions extends FetchEipDataOptions {
@@ -42,6 +53,7 @@ export interface LoadedCache {
   readContextIndex(): Promise<Record<string, ContextEntry[]>>;
   readEipsIndex(): Promise<EipIndexEntry[]>;
   readMeetingsIndex(): Promise<MeetingIndexEntry[]>;
+  readPmNote(type: string, dirName: string): Promise<PmMeetingNote | null>;
 }
 
 export class CacheError extends Error {
@@ -388,6 +400,7 @@ function buildContextIndex(cachedTldrs: CachedTldrEntry[]): Record<string, Conte
 function buildMeetingsIndex(
   manifestRefs: MeetingRef[],
   cachedTldrs: CachedTldrEntry[],
+  pmNotes: PmMeetingNote[],
 ): MeetingIndexEntry[] {
   const cachedTldrRefs = new Map(
     cachedTldrs.map(({ ref }) => [`${ref.type}/${ref.dirName}`, ref] as const),
@@ -404,7 +417,8 @@ function buildMeetingsIndex(
     }
   }
 
-  return [...meetings.values()]
+  // Build forkcast entries (from manifest + cached TLDRs)
+  const forkcastEntries: MeetingIndexEntry[] = [...meetings.values()]
     .sort(compareMeetingEntries)
     .map((ref) => ({
       type: ref.type,
@@ -412,13 +426,224 @@ function buildMeetingsIndex(
       number: ref.number,
       dirName: ref.dirName,
       tldrAvailable: cachedTldrRefs.has(`${ref.type}/${ref.dirName}`),
+      source: "forkcast" as const,
     }));
+
+  // Build a lookup by type+date to allow augmenting forkcast entries with pm data
+  const forkcastByTypeAndDate = new Map<string, MeetingIndexEntry>();
+  for (const entry of forkcastEntries) {
+    forkcastByTypeAndDate.set(`${entry.type}/${entry.date}`, entry);
+  }
+
+  // Add pm meetings as independent entries, or augment forkcast entries when
+  // the same type+date already exists
+  const pmEntries: MeetingIndexEntry[] = [];
+  for (const note of pmNotes) {
+    if (!note.date) {
+      continue;
+    }
+
+    const matchKey = `${note.type}/${note.date}`;
+    const existingForkcast = forkcastByTypeAndDate.get(matchKey);
+    if (existingForkcast) {
+      // Augment the existing forkcast entry — don't add a duplicate
+      existingForkcast.pmNoteAvailable = true;
+      continue;
+    }
+
+    // No matching forkcast entry — add as independent pm-sourced entry
+    pmEntries.push({
+      type: note.type,
+      date: note.date,
+      number: note.number,
+      dirName: `pm-${note.date}_${note.number}`,
+      tldrAvailable: false,
+      pmNoteAvailable: true,
+      source: "pm",
+    });
+  }
+
+  return [...forkcastEntries, ...pmEntries].sort(compareMeetingEntries);
 }
 
 async function writeJsonFileAtomic(filePath: string, value: unknown) {
   const tmpPath = `${filePath}.tmp-${process.pid}`;
   await fsp.writeFile(tmpPath, JSON.stringify(value, null, 2));
   await fsp.rename(tmpPath, filePath);
+}
+
+// ---------------------------------------------------------------------------
+// pm note helpers
+// ---------------------------------------------------------------------------
+
+/**
+ * Walk the pm cache directory tree and parse all meeting note markdown files.
+ * Skips non-meeting files (README.md, templates, etc.).
+ *
+ * Returns an empty array if the pm directory does not exist (pm data not fetched yet).
+ */
+async function loadPmNotes(
+  cacheRoot: string | undefined,
+  stderr: WritableLike,
+): Promise<PmMeetingNote[]> {
+  const pmPaths = getPmCachePaths(cacheRoot);
+  const pmDir = pmPaths.pmDir;
+
+  const exists = await pathExists(pmDir);
+  if (!exists) {
+    return [];
+  }
+
+  const notes: PmMeetingNote[] = [];
+
+  // Read EL meetings
+  await loadPmNotesFromDir(
+    pmPaths.elDir,
+    "acde",
+    null,
+    notes,
+    stderr,
+  );
+
+  // Read CL meetings
+  await loadPmNotesFromDir(
+    pmPaths.clDir,
+    "acdc",
+    null,
+    notes,
+    stderr,
+  );
+
+  // Read breakout rooms — one subdirectory per series
+  let seriesDirs: string[];
+  try {
+    const entries = await fsp.readdir(pmPaths.breakoutDir, { withFileTypes: true });
+    seriesDirs = entries
+      .filter((e) => e.isDirectory())
+      .map((e) => e.name);
+  } catch {
+    seriesDirs = [];
+  }
+
+  for (const series of seriesDirs) {
+    await loadPmNotesFromDir(
+      path.join(pmPaths.breakoutDir, series),
+      "breakout",
+      series,
+      notes,
+      stderr,
+    );
+  }
+
+  return notes;
+}
+
+async function loadPmNotesFromDir(
+  dir: string,
+  type: PmMeetingType,
+  series: string | null,
+  notes: PmMeetingNote[],
+  stderr: WritableLike,
+): Promise<void> {
+  let files: string[];
+  try {
+    files = await fsp.readdir(dir);
+  } catch {
+    return;
+  }
+
+  const mdFiles = files.filter((f) => f.endsWith(".md") && !shouldSkipFile(f));
+
+  for (const filename of mdFiles) {
+    const filePath = path.join(dir, filename);
+    try {
+      const content = await fsp.readFile(filePath, "utf8");
+      const note = parsePmMeeting(content, type, filename, series);
+      notes.push(note);
+    } catch (error) {
+      // Skip unparseable files but warn
+      const msg = error instanceof Error ? error.message : String(error);
+      stderr.write(`Warning: failed to parse pm note ${filePath}: ${msg}\n`);
+    }
+  }
+}
+
+/**
+ * Add pm note EIP references to the context index.
+ * Pm notes use the same context entry format as TLDRs.
+ */
+function addPmNotesToContextIndex(
+  contextIndex: Record<string, ContextEntry[]>,
+  pmNotes: PmMeetingNote[],
+): void {
+  for (const note of pmNotes) {
+    if (note.eipReferences.length === 0) {
+      continue;
+    }
+
+    // Build a meeting display name for the context entry
+    const meetingName = note.title;
+    const date = note.date ?? "0000-00-00";
+
+    const baseEntry = {
+      meeting: meetingName,
+      type: note.type,
+      date,
+      number: note.number,
+    };
+
+    for (const eipId of note.eipReferences) {
+      const eipKey = String(eipId);
+
+      if (!contextIndex[eipKey]) {
+        contextIndex[eipKey] = [];
+      }
+
+      // Check if this meeting is already represented
+      const alreadyExists = contextIndex[eipKey].some(
+        (e) => e.type === note.type && e.number === note.number && e.date === date,
+      );
+
+      if (!alreadyExists) {
+        const entries = contextIndex[eipKey];
+
+        // Build a snippet that actually mentions this EIP
+        const eipPattern = new RegExp(`EIP[- ]?${eipId}[^\\n]{0,150}`, "i");
+        const eipMatch = eipPattern.exec(note.bodyText);
+        const mention = eipMatch
+          ? eipMatch[0].trim()
+          : `Referenced in ${meetingName}`;
+
+        // Add pm meeting context entry
+        const pmEntry: ContextEntry = {
+          ...baseEntry,
+          mentions: [mention],
+        };
+
+        entries.push(pmEntry);
+      } else {
+        // Append mention to existing entry
+        const existing = contextIndex[eipKey].find(
+          (e) => e.type === note.type && e.number === note.number && e.date === date,
+        );
+        if (existing) {
+          const eipPattern = new RegExp(`EIP[- ]?${eipId}[^\\n]{0,150}`, "i");
+          const eipMatch = eipPattern.exec(note.bodyText);
+          if (eipMatch) {
+            const snippet = eipMatch[0].trim();
+            if (!existing.mentions.includes(snippet)) {
+              existing.mentions.push(snippet);
+            }
+          }
+        }
+      }
+    }
+  }
+
+  // Re-sort each EIP's entries by date
+  for (const entries of Object.values(contextIndex)) {
+    entries.sort(compareMeetingEntries);
+  }
 }
 
 async function getNewestMtime(targetPath: string): Promise<number> {
@@ -480,7 +705,7 @@ async function indexJsonIsValid(filePath: string): Promise<boolean> {
   }
 }
 
-async function indexesNeedRebuild(paths: CachePaths) {
+async function indexesNeedRebuild(paths: CachePaths, pmDir: string) {
   const eipsIndexMtime = await getFileMtime(paths.eipsIndexPath);
   const contextIndexMtime = await getFileMtime(paths.contextIndexPath);
   const meetingsIndexMtime = await getFileMtime(paths.meetingsIndexPath);
@@ -498,6 +723,18 @@ async function indexesNeedRebuild(paths: CachePaths) {
     return true;
   }
 
+  // Detect stale meetings-index format: if entries lack the `source` field
+  // introduced with pm-note support, force a rebuild so all entries get tagged.
+  try {
+    const raw = await fsp.readFile(paths.meetingsIndexPath, "utf8");
+    const entries = JSON.parse(raw) as MeetingIndexEntry[];
+    if (entries.length > 0 && entries[0]!.source === undefined) {
+      return true;
+    }
+  } catch {
+    return true;
+  }
+
   const newestEipMtime = await getNewestMtime(paths.eipsDir);
   if (newestEipMtime > eipsIndexMtime) {
     return true;
@@ -508,7 +745,17 @@ async function indexesNeedRebuild(paths: CachePaths) {
     return true;
   }
 
-  return (await getFileMtime(paths.meetingsManifestPath)) > meetingsIndexMtime;
+  if ((await getFileMtime(paths.meetingsManifestPath)) > meetingsIndexMtime) {
+    return true;
+  }
+
+  // Also rebuild if pm notes are newer than the current indexes
+  const newestPmMtime = await getNewestMtime(pmDir);
+  if (newestPmMtime > contextIndexMtime || newestPmMtime > meetingsIndexMtime) {
+    return true;
+  }
+
+  return false;
 }
 
 export function warnIfStale(meta: CacheMeta, stderr: WritableLike) {
@@ -531,14 +778,23 @@ function createLazyReader<T>(filePath: string, label: string) {
 
 export async function buildCache(options: BuildCacheOptions = {}): Promise<BuildCacheResult> {
   const paths = buildPaths(options.cacheRoot);
-  const [meta, eipsIndex, manifestRefs, cachedTldrs] = await Promise.all([
+  const stderr: WritableLike = process.stderr;
+
+  const [meta, eipsIndex, manifestRefs, cachedTldrs, pmNotes] = await Promise.all([
     readMeta(paths),
     buildEipsIndex(paths),
     readMeetingManifest(paths),
     loadCachedTldrs(paths),
+    loadPmNotes(options.cacheRoot, stderr),
   ]);
   const contextIndex = buildContextIndex(cachedTldrs);
-  const meetingsIndex = buildMeetingsIndex(manifestRefs, cachedTldrs);
+
+  // Augment context index with pm note references
+  if (pmNotes.length > 0) {
+    addPmNotesToContextIndex(contextIndex, pmNotes);
+  }
+
+  const meetingsIndex = buildMeetingsIndex(manifestRefs, cachedTldrs, pmNotes);
 
   await Promise.all([
     writeJsonFileAtomic(paths.eipsIndexPath, eipsIndex),
@@ -551,19 +807,21 @@ export async function buildCache(options: BuildCacheOptions = {}): Promise<Build
     eipCount: eipsIndex.length,
     contextKeyCount: Object.keys(contextIndex).length,
     meetingCount: meetingsIndex.length,
+    pmNoteCount: pmNotes.length,
   };
 }
 
 export async function loadCache(options: LoadCacheOptions = {}): Promise<LoadedCache> {
   const { fetcher = fetchEipData, stderr = process.stderr, ...fetchOptions } = options;
   const paths = buildPaths(options.cacheRoot);
+  const pmPaths = getPmCachePaths(options.cacheRoot);
   let meta: CacheMeta | undefined;
 
   if (!(await rawCacheExists(paths))) {
     const fetchResult = await fetcher({ ...fetchOptions, stderr });
     await ensureFetchResultMetadata(paths, fetchResult);
     meta = (await buildCache({ cacheRoot: options.cacheRoot })).meta;
-  } else if (await indexesNeedRebuild(paths)) {
+  } else if (await indexesNeedRebuild(paths, pmPaths.pmDir)) {
     meta = (await buildCache({ cacheRoot: options.cacheRoot })).meta;
   }
 
@@ -575,5 +833,46 @@ export async function loadCache(options: LoadCacheOptions = {}): Promise<LoadedC
     readContextIndex: createLazyReader(paths.contextIndexPath, "context-index.json"),
     readEipsIndex: createLazyReader(paths.eipsIndexPath, "eips-index.json"),
     readMeetingsIndex: createLazyReader(paths.meetingsIndexPath, "meetings-index.json"),
+    readPmNote: createPmNoteReader(pmPaths.pmDir, options.cacheRoot, stderr),
+  };
+}
+
+/**
+ * Create a function that reads a pm meeting note on demand.
+ *
+ * On first call, all pm notes are loaded upfront and indexed in memory by both
+ * forkcast-style dirName (`{type}/{date}_{number}`) and pm-style dirName
+ * (`{type}/pm-{date}_{number}`). Subsequent lookups are O(1).
+ *
+ * Returns null if the pm cache does not exist or the note is not found.
+ */
+function createPmNoteReader(
+  _pmDir: string,
+  cacheRoot: string | undefined,
+  stderr: WritableLike,
+) {
+  // Lazy-loaded index: built on first call
+  let indexPromise: Promise<Map<string, PmMeetingNote>> | undefined;
+
+  async function buildIndex(): Promise<Map<string, PmMeetingNote>> {
+    const notes = await loadPmNotes(cacheRoot, stderr);
+    const index = new Map<string, PmMeetingNote>();
+    for (const note of notes) {
+      if (note.date) {
+        // Index by forkcast-style dirName: {type}/{date}_{number}
+        const forkcastKey = `${note.type}/${note.date}_${note.number}`;
+        // Index by pm-style dirName: {type}/pm-{date}_{number}
+        const pmKey = `${note.type}/pm-${note.date}_${note.number}`;
+        index.set(forkcastKey, note);
+        index.set(pmKey, note);
+      }
+    }
+    return index;
+  }
+
+  return async (type: string, dirName: string): Promise<PmMeetingNote | null> => {
+    indexPromise ??= buildIndex();
+    const index = await indexPromise;
+    return index.get(`${type}/${dirName}`) ?? null;
   };
 }

@@ -203,6 +203,10 @@ export interface MeetingIndexEntry {
   number: number;
   dirName: string;
   tldrAvailable: boolean;
+  /** True when a parsed pm meeting note is available for this entry. */
+  pmNoteAvailable?: boolean;
+  /** "forkcast" for TLDR-based meetings, "pm" for pm-repo-only meetings */
+  source?: "forkcast" | "pm";
 }
 
 export interface ContextEntry {
@@ -221,6 +225,8 @@ export interface OutputQuery {
 export interface OutputSource {
   forkcast_commit: string;
   last_updated: string;
+  /** Present when pm repo data has been fetched. */
+  pm_commit?: string;
 }
 
 export interface OutputEnvelope<T> {
@@ -246,6 +252,12 @@ export interface ErrorOutput {
 
 export interface CacheMeta {
   forkcast_commit: string;
+  last_updated: string;
+  version: number;
+}
+
+export interface PmMeta {
+  pm_commit: string;
   last_updated: string;
   version: number;
 }

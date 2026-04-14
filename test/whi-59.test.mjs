@@ -221,6 +221,7 @@ test("WHI-59 builds EIP, context, and meeting indexes from the raw cache", async
         number: 234,
         dirName: "2026-04-09_234",
         tldrAvailable: true,
+        source: "forkcast",
       },
       {
         type: "acdt",
@@ -228,6 +229,7 @@ test("WHI-59 builds EIP, context, and meeting indexes from the raw cache", async
         number: 58,
         dirName: "2026-04-10_058",
         tldrAvailable: false,
+        source: "forkcast",
       },
       {
         type: "acdc",
@@ -235,6 +237,7 @@ test("WHI-59 builds EIP, context, and meeting indexes from the raw cache", async
         number: 99,
         dirName: "2026-04-11_099",
         tldrAvailable: true,
+        source: "forkcast",
       },
     ]);
   } finally {
@@ -452,6 +455,7 @@ test("WHI-59 loadCache accepts fetcher fallback results even when the manifest i
         number: 234,
         dirName: "2026-04-09_234",
         tldrAvailable: true,
+        source: "forkcast",
       },
     ]);
     assert.equal((await loaded.readEipsIndex()).length, 3);
