@@ -1,4 +1,5 @@
 import { Command } from "commander";
+import { decisionsCommand } from "./commands/decisions.js";
 import { eipCommand } from "./commands/eip.js";
 import { eipsCommand } from "./commands/eips.js";
 import { forksCommand } from "./commands/forks.js";
@@ -24,6 +25,7 @@ program.addCommand(eipsCommand);
 program.addCommand(forksCommand);
 program.addCommand(meetingsCommand);
 program.addCommand(searchCommand);
+program.addCommand(decisionsCommand);
 program.addCommand(updateCommand);
 
 await program.parseAsync();
