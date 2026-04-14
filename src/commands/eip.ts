@@ -2,6 +2,7 @@ import fsp from "node:fs/promises";
 import path from "node:path";
 import { Command } from "commander";
 import { loadCache, warnIfStale } from "../lib/cache.js";
+import { getEipById, getContextForEip } from "../lib/db.js";
 import { getCacheLayout, getCacheRoot, type WritableLike } from "../lib/fetcher.js";
 import { CommandError, getCommandErrorCode } from "../lib/errors.js";
 import { exitCodeForErrorCode, writeJsonEnvelope, writeJsonError, writePrettyError } from "../lib/output.js";
@@ -251,15 +252,22 @@ async function runEipCommand(
   let meta: CacheMeta;
   let context: ContextEntry[] | undefined;
   let usedLightPath = false;
+  let loaded: Awaited<ReturnType<typeof loadCache>> | undefined;
 
   if (options.context) {
     // Full path: needs the context index, which requires loadCache + potential
     // index rebuild.  This is expected — building the context index requires
     // parsing all TLDRs.
-    const loaded = await deps.loadCache({ cacheRoot, stderr: deps.stderr });
+    loaded = await deps.loadCache({ cacheRoot, stderr: deps.stderr });
     meta = loaded.meta;
-    const contextIndex = await loaded.readContextIndex();
-    context = contextIndex[String(eipId)] ?? [];
+
+    // Use SQLite context query when available; fall back to JSON index.
+    if (loaded.db) {
+      context = getContextForEip(loaded.db, eipId);
+    } else {
+      const contextIndex = await loaded.readContextIndex();
+      context = contextIndex[String(eipId)] ?? [];
+    }
   } else {
     // Light path: only needs meta.json + the single EIP file.  Skips the full
     // index rebuild, so a malformed *sibling* EIP cannot break this lookup.
@@ -270,7 +278,17 @@ async function runEipCommand(
 
   let eip: OutputEip;
   try {
-    eip = await readCachedEip(cacheRoot, eipId, deps);
+    // When we already have a loaded cache with SQLite, use the DB for the EIP read.
+    // On the light path we skip loadCache, so fall back to file read directly.
+    if (loaded?.db) {
+      const rawEip = getEipById(loaded.db, eipId);
+      if (!rawEip) {
+        throw new CommandError(`EIP ${eipId} not found`, "EIP_NOT_FOUND");
+      }
+      eip = normalizeEipForOutput(rawEip);
+    } else {
+      eip = await readCachedEip(cacheRoot, eipId, deps);
+    }
   } catch (error) {
     // On the light path, a missing EIP file could mean the cache is incomplete
     // (e.g. empty eips/ dir, interrupted fetch) rather than the EIP genuinely
@@ -282,9 +300,19 @@ async function runEipCommand(
       && error instanceof CommandError
       && error.code === "EIP_NOT_FOUND"
     ) {
-      const loaded = await deps.loadCache({ cacheRoot, stderr: deps.stderr });
+      loaded = await deps.loadCache({ cacheRoot, stderr: deps.stderr });
       meta = loaded.meta;
-      eip = await readCachedEip(cacheRoot, eipId, deps);
+
+      // Try SQLite first in the retry path.
+      if (loaded.db) {
+        const rawEip = getEipById(loaded.db, eipId);
+        if (!rawEip) {
+          throw new CommandError(`EIP ${eipId} not found`, "EIP_NOT_FOUND");
+        }
+        eip = normalizeEipForOutput(rawEip);
+      } else {
+        eip = await readCachedEip(cacheRoot, eipId, deps);
+      }
     } else {
       throw error;
     }

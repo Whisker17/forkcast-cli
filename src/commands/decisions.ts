@@ -2,6 +2,7 @@ import fsp from "node:fs/promises";
 import path from "node:path";
 import { Command } from "commander";
 import { loadCache } from "../lib/cache.js";
+import { queryDecisions, queryKeyDecisions } from "../lib/db.js";
 import { CommandError, getCommandErrorCode } from "../lib/errors.js";
 import { fetchKeyDecisions, fetchTldr, getCacheLayout, getCacheRoot, type WritableLike } from "../lib/fetcher.js";
 import { exitCodeForErrorCode, writeJsonEnvelope, writeJsonError, writePrettyError } from "../lib/output.js";
@@ -634,7 +635,137 @@ async function runDecisionsCommand(
   const { loaded, allEntries } = await loadMeetingsIndex(cacheRoot, deps);
   const layout = getCacheLayout(cacheRoot);
 
-  // Apply meeting-level filters (type, after) before loading TLDRs
+  // ---------- SQLite fast path ----------
+  if (loaded.db) {
+    const dbFilters = {
+      type: filters.type,
+      after: filters.after,
+    };
+
+    // Query TLDR decisions from DB
+    const tldrRows = queryDecisions(loaded.db, dbFilters);
+    const tldrDecisions: DecisionResult[] = tldrRows.map((row) => ({
+      source: "tldr" as const,
+      meetingType: row.meeting_type,
+      meetingDate: row.meeting_date,
+      meetingNumber: row.meeting_number,
+      meetingName: formatMeetingName(row.meeting_type, row.meeting_number, row.meeting_date),
+      timestamp: row.timestamp ?? "",
+      decision: row.decision_text,
+      eips: null,
+      stageChange: null,
+      fork: null,
+      context: null,
+    }));
+
+    // Query key_decisions from DB
+    const kdRows = queryKeyDecisions(loaded.db, dbFilters);
+    const kdDecisions: DecisionResult[] = kdRows.map((row) => ({
+      source: "key_decisions" as const,
+      meetingType: row.meeting_type,
+      meetingDate: row.meeting_date,
+      meetingNumber: row.meeting_number,
+      meetingName: formatMeetingName(row.meeting_type, row.meeting_number, row.meeting_date),
+      timestamp: row.timestamp ?? "",
+      decision: row.original_text,
+      eips: row.eips_json ? JSON.parse(row.eips_json) as number[] : null,
+      stageChange: row.stage_change_to ? { to: row.stage_change_to } : null,
+      fork: row.fork,
+      context: row.context,
+    }));
+
+    let allDecisions = [...tldrDecisions, ...kdDecisions];
+
+    // Apply --last: filter to decisions from the N most recent meetings
+    if (filters.last !== undefined) {
+      // Collect distinct meetings, sort desc, take N
+      const meetingKeys = new Set<string>();
+      const meetingByKey = new Map<string, { date: string; number: number }>();
+      for (const d of allDecisions) {
+        const key = `${d.meetingDate}_${d.meetingNumber}_${d.meetingType}`;
+        meetingKeys.add(key);
+        if (!meetingByKey.has(key)) {
+          meetingByKey.set(key, { date: d.meetingDate, number: d.meetingNumber });
+        }
+      }
+      const sortedKeys = [...meetingByKey.entries()]
+        .sort(([, a], [, b]) => b.date.localeCompare(a.date) || b.number - a.number)
+        .slice(0, filters.last)
+        .map(([k]) => k);
+      const allowedKeys = new Set(sortedKeys);
+      allDecisions = allDecisions.filter((d) =>
+        allowedKeys.has(`${d.meetingDate}_${d.meetingNumber}_${d.meetingType}`),
+      );
+    }
+
+    // Deduplicate
+    let deduped = deduplicateDecisions(allDecisions);
+
+    // Apply fork filter
+    if (filters.fork) {
+      const forkLower = filters.fork.toLowerCase();
+      deduped = deduped.filter((r) => matchesFork(r, forkLower));
+    }
+
+    let results = sortDecisions(deduped);
+
+    if (filters.limit !== undefined) {
+      results = results.slice(0, filters.limit);
+    }
+
+    // Warning for meetings without TLDR data — filter allEntries to match
+    // the same type/after/last constraints for parity with the JSON path.
+    let filteredForWarning = allEntries;
+    if (filters.type) {
+      filteredForWarning = filteredForWarning.filter(
+        (e) => e.type.toLowerCase() === filters.type,
+      );
+    }
+    if (filters.after) {
+      filteredForWarning = filteredForWarning.filter((e) => e.date >= filters.after!);
+    }
+    if (filters.last !== undefined) {
+      filteredForWarning = filteredForWarning
+        .slice()
+        .sort((a, b) => b.date.localeCompare(a.date) || b.number - a.number)
+        .slice(0, filters.last);
+    }
+    const noDataCount = filteredForWarning.filter((e) => !e.tldrAvailable).length;
+    let warning: string | undefined;
+    if (noDataCount > 0) {
+      warning = `${noDataCount} of ${filteredForWarning.length} selected meeting(s) have no TLDR data and may contribute fewer decisions`;
+    }
+
+    const envelope: OutputEnvelope<DecisionResult> = {
+      query: {
+        command: "decisions",
+        filters: {
+          ...(filters.fork ? { fork: filters.fork } : {}),
+          ...(filters.after ? { after: filters.after } : {}),
+          ...(filters.type ? { type: filters.type } : {}),
+          ...(filters.last !== undefined ? { last: filters.last } : {}),
+          ...(filters.limit !== undefined ? { limit: filters.limit } : {}),
+        },
+      },
+      results,
+      count: results.length,
+      source: {
+        forkcast_commit: loaded.meta.forkcast_commit,
+        last_updated: loaded.meta.last_updated,
+      },
+      ...(warning ? { warning } : {}),
+    };
+
+    if (filters.pretty) {
+      deps.stdout.write(formatPrettyDecisions(results, filters));
+      return;
+    }
+
+    writeJsonEnvelope(envelope, deps.stdout);
+    return;
+  }
+
+  // ---------- JSON fallback path ----------
   let filteredEntries = allEntries;
 
   if (filters.type) {

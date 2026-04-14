@@ -1,5 +1,6 @@
 import { Command } from "commander";
 import { loadCache } from "../lib/cache.js";
+import { getEipCount, queryEips } from "../lib/db.js";
 import { CommandError, getCommandErrorCode } from "../lib/errors.js";
 import { loadEipsIndex } from "../lib/eips-index-loader.js";
 import { getCacheRoot, type WritableLike } from "../lib/fetcher.js";
@@ -151,6 +152,20 @@ function getLayerWarning(allEntries: EipIndexEntry[], layer?: "EL" | "CL") {
   return `Only ${withLayer} of ${allEntries.length} EIPs have a layer field. ${excluded} ${eipWord} excluded from this filter.`;
 }
 
+/**
+ * DB-based layer warning — avoids loading the full JSON index just for a count.
+ */
+function getLayerWarningFromDb(db: import("../lib/db.js").Db, layer?: "EL" | "CL") {
+  if (!layer) return undefined;
+
+  const total = getEipCount(db);
+  const row = db.prepare("SELECT COUNT(*) AS cnt FROM eips WHERE layer IS NOT NULL").get() as { cnt: number };
+  const withLayer = row.cnt;
+  const excluded = total - withLayer;
+  const eipWord = excluded === 1 ? "EIP was" : "EIPs were";
+  return `Only ${withLayer} of ${total} EIPs have a layer field. ${excluded} ${eipWord} excluded from this filter.`;
+}
+
 function formatForks(entry: EipIndexEntry) {
   if (entry.forks.length === 0) {
     return "none";
@@ -207,25 +222,46 @@ function formatPrettyEips(entries: EipIndexEntry[], warning?: string) {
 async function runEipsCommand(options: EipsCommandOptions, deps: EipsCommandDependencies) {
   const parsedFilters = parseFilters(options);
   const cacheRoot = deps.getCacheRoot();
-  const { loaded, allEntries } = await loadEipsIndex(cacheRoot, deps);
 
-  let results = allEntries.filter((entry) => matchesFork(entry, parsedFilters.fork));
+  let results: EipIndexEntry[];
+  let warning: string | undefined;
+  let loaded: Awaited<ReturnType<typeof loadCache>>;
 
-  if (parsedFilters.status) {
-    results = results.filter((entry) => entry.status === parsedFilters.status);
+  // Use SQLite query when the DB is available — avoids loading the full JSON index.
+  const preLoaded = await deps.loadCache({ cacheRoot, stderr: deps.stderr });
+  if (preLoaded.db) {
+    loaded = preLoaded;
+    results = queryEips(preLoaded.db, {
+      fork: parsedFilters.fork,
+      inclusion: parsedFilters.inclusion,
+      layer: parsedFilters.layer,
+      status: parsedFilters.status,
+      limit: parsedFilters.limit,
+    });
+    warning = getLayerWarningFromDb(preLoaded.db, parsedFilters.layer);
+  } else {
+    // Fallback: load full JSON index
+    const { loaded: fullLoaded, allEntries } = await loadEipsIndex(cacheRoot, deps);
+    loaded = fullLoaded;
+
+    results = allEntries.filter((entry) => matchesFork(entry, parsedFilters.fork));
+
+    if (parsedFilters.status) {
+      results = results.filter((entry) => entry.status === parsedFilters.status);
+    }
+
+    results = results.filter((entry) => matchesInclusion(entry, parsedFilters.inclusion, parsedFilters.fork));
+
+    if (parsedFilters.layer) {
+      results = results.filter((entry) => entry.layer === parsedFilters.layer);
+    }
+
+    if (parsedFilters.limit !== undefined) {
+      results = results.slice(0, parsedFilters.limit);
+    }
+
+    warning = getLayerWarning(allEntries, parsedFilters.layer);
   }
-
-  results = results.filter((entry) => matchesInclusion(entry, parsedFilters.inclusion, parsedFilters.fork));
-
-  if (parsedFilters.layer) {
-    results = results.filter((entry) => entry.layer === parsedFilters.layer);
-  }
-
-  if (parsedFilters.limit !== undefined) {
-    results = results.slice(0, parsedFilters.limit);
-  }
-
-  const warning = getLayerWarning(allEntries, parsedFilters.layer);
 
   const envelope: OutputEnvelope<EipIndexEntry> = {
     query: {

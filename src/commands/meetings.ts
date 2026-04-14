@@ -2,6 +2,7 @@ import fsp from "node:fs/promises";
 import path from "node:path";
 import { Command } from "commander";
 import { loadCache } from "../lib/cache.js";
+import { queryMeetings, getTldr as getDbTldr } from "../lib/db.js";
 import { CommandError, getCommandErrorCode } from "../lib/errors.js";
 import { fetchTldr, getCacheLayout, getCacheRoot, type WritableLike } from "../lib/fetcher.js";
 import { exitCodeForErrorCode, writeJsonEnvelope, writeJsonError, writePrettyError } from "../lib/output.js";
@@ -392,28 +393,52 @@ async function runMeetingsCommand(
   const cacheRoot = deps.getCacheRoot();
   const { loaded, allEntries } = await loadMeetingsIndex(cacheRoot, deps);
 
-  // Apply filters
-  let results = allEntries.filter((entry) => matchesType(entry, parsedFilters.type));
-  results = results.filter((entry) => matchesAfter(entry, parsedFilters.after));
+  let results: MeetingIndexEntry[];
 
-  // When --last is used: sort descending, slice, then re-sort ascending for
-  // consistent output.  Without --last, default sort is ascending (the natural
-  // order from the index).
-  if (parsedFilters.last !== undefined) {
-    results = results
-      .slice()
-      .sort((a, b) => b.date.localeCompare(a.date) || b.number - a.number)
-      .slice(0, parsedFilters.last)
-      .sort((a, b) => a.date.localeCompare(b.date) || a.number - b.number);
+  // Use SQLite query when the DB is available.
+  if (loaded.db) {
+    results = queryMeetings(loaded.db, {
+      type: parsedFilters.type,
+      after: parsedFilters.after,
+      last: parsedFilters.last,
+    });
+  } else {
+    // Apply filters
+    results = allEntries.filter((entry) => matchesType(entry, parsedFilters.type));
+    results = results.filter((entry) => matchesAfter(entry, parsedFilters.after));
+
+    // When --last is used: sort descending, slice, then re-sort ascending for
+    // consistent output.  Without --last, default sort is ascending (the natural
+    // order from the index).
+    if (parsedFilters.last !== undefined) {
+      results = results
+        .slice()
+        .sort((a, b) => b.date.localeCompare(a.date) || b.number - a.number)
+        .slice(0, parsedFilters.last)
+        .sort((a, b) => a.date.localeCompare(b.date) || a.number - b.number);
+    }
   }
 
   // Load TLDR summaries for entries where tldrAvailable is true.
   const tldrsDir = getCacheLayout(cacheRoot).tldrsDir;
   const meetingResults: MeetingResult[] = await Promise.all(
     results.map(async (entry) => {
-      const tldrSummary = entry.tldrAvailable
-        ? await loadTldrSummary(tldrsDir, entry, deps.fetchTldr)
-        : null;
+      let tldrSummary: TldrSummary | null = null;
+
+      if (entry.tldrAvailable) {
+        // Try SQLite first; fall back to file system.
+        if (loaded.db) {
+          const tldr = getDbTldr(loaded.db, entry.type, entry.dirName);
+          tldrSummary = tldr ? parseTldrSummary(tldr) : null;
+
+          // If not in DB (e.g. fetched on-demand after DB was built), fall through to file.
+          if (tldrSummary === null) {
+            tldrSummary = await loadTldrSummary(tldrsDir, entry, deps.fetchTldr);
+          }
+        } else {
+          tldrSummary = await loadTldrSummary(tldrsDir, entry, deps.fetchTldr);
+        }
+      }
 
       const pmNoteSummary = entry.pmNoteAvailable
         ? await loadPmNoteSummary(entry, loaded)
