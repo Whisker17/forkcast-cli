@@ -748,3 +748,36 @@ export async function fetchTldr(
   const timeoutMs = options.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
   return fetchTldrContents(pagesBaseUrl, { type, dirName }, timeoutMs);
 }
+
+/**
+ * Fetch a single meeting key_decisions.json artifact from GitHub Pages on demand.
+ *
+ * Returns the prettified JSON string on success, `null` when the upstream
+ * confirms the artifact does not exist (HTTP 404).  Throws `FetcherError` on
+ * network or data errors so callers can distinguish "no artifact" from "fetch
+ * broke".
+ */
+export async function fetchKeyDecisions(
+  type: string,
+  dirName: string,
+  options: { pagesBaseUrl?: string; requestTimeoutMs?: number } = {},
+): Promise<string | null> {
+  const pagesBaseUrl = options.pagesBaseUrl ?? DEFAULT_PAGES_BASE_URL;
+  const timeoutMs = options.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
+  const url = `${pagesBaseUrl.replace(/\/$/, "")}/${type}/${dirName}/key_decisions.json`;
+  const response = await request(url, timeoutMs, { accept: "application/json" });
+
+  if (response.statusCode === 404) {
+    return null;
+  }
+
+  if (response.statusCode < 200 || response.statusCode >= 300) {
+    throw createFetchError(`Failed to fetch ${url}: HTTP ${response.statusCode}`);
+  }
+
+  try {
+    return JSON.stringify(JSON.parse(response.body.toString("utf8")), null, 2);
+  } catch (error) {
+    throw createDataError(`Invalid JSON returned by ${url}: ${describeError(error)}`, error);
+  }
+}
