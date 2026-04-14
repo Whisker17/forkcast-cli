@@ -41,8 +41,8 @@ const FORK_DEFINITIONS: ForkDefinition[] = [
   {
     name: "Hegota",
     status: "Planning",
-    activationDate: null,
-    description: "FOCIL SFI'd, Frame Tx CFI'd",
+    activationDate: "TBD",
+    description: "Headliner selection concluded: FOCIL SFI'd, Frame Tx CFI'd",
   },
 ];
 

@@ -14,15 +14,15 @@ import type { CacheMeta, OutputEnvelope } from "../types/index.js";
 export interface UpdateResultUpToDate {
   status: "up_to_date";
   commit: string;
-  last_updated: string;
+  lastUpdated: string;
 }
 
 export interface UpdateResultUpdated {
   status: "updated";
-  old_commit: string | null;
-  new_commit: string;
-  eips_count: number;
-  meetings_count: number;
+  oldCommit: string | null;
+  newCommit: string;
+  eipsCount: number;
+  meetingsCount: number;
 }
 
 export type UpdateResult = UpdateResultUpToDate | UpdateResultUpdated;
@@ -179,10 +179,25 @@ async function fetchLatestCommit(timeoutMs = DEFAULT_REQUEST_TIMEOUT_MS): Promis
   });
 }
 
-async function readMetaFile(metaPath: string): Promise<CacheMeta | null> {
+async function readMetaFile(metaPath: string, stderr?: WritableLike): Promise<CacheMeta | null> {
+  let raw: string;
   try {
-    return JSON.parse(await fsp.readFile(metaPath, "utf8")) as CacheMeta;
+    raw = await fsp.readFile(metaPath, "utf8");
+  } catch (error) {
+    // File doesn't exist — normal for first-time usage.
+    if (error && typeof error === "object" && "code" in error && (error as NodeJS.ErrnoException).code === "ENOENT") {
+      return null;
+    }
+    // Unexpected I/O error — treat as missing but warn.
+    stderr?.write(`Warning: failed to read ${metaPath}: ${error instanceof Error ? error.message : String(error)}\n`);
+    return null;
+  }
+
+  try {
+    return JSON.parse(raw) as CacheMeta;
   } catch {
+    // File exists but contains invalid JSON — warn so the user knows the cache is damaged.
+    stderr?.write(`Warning: ${metaPath} contains invalid JSON; treating cache as empty.\n`);
     return null;
   }
 }
@@ -193,7 +208,7 @@ function getDefaultDependencies(): UpdateCommandDependencies {
     fetchEipData,
     getCacheRoot,
     getLatestCommit: fetchLatestCommit,
-    readMeta: readMetaFile,
+    readMeta: (metaPath) => readMetaFile(metaPath, process.stderr),
     stderr: process.stderr,
     stdout: process.stdout,
   };
@@ -222,17 +237,17 @@ async function runUpdateCommand(
     const fetchResult = await deps.fetchEipData({ cacheRoot, stderr: deps.stderr });
     const buildResult = await deps.buildCache({ cacheRoot });
 
-    const old_commit = existingMeta?.forkcast_commit ?? null;
-    const new_commit = fetchResult.meta.forkcast_commit;
+    const oldCommit = existingMeta?.forkcast_commit ?? null;
+    const newCommit = fetchResult.meta.forkcast_commit;
 
     // If the force-fetched commit matches the existing one (e.g. GitHub API was
     // rate-limited inside fetchEipData and the existing cache was returned),
     // report up_to_date instead of "updated" to avoid misleading output.
-    if (old_commit !== null && old_commit === new_commit) {
+    if (oldCommit !== null && oldCommit === newCommit) {
       const result: UpdateResultUpToDate = {
         status: "up_to_date",
-        commit: new_commit,
-        last_updated: fetchResult.meta.last_updated,
+        commit: newCommit,
+        lastUpdated: fetchResult.meta.last_updated,
       };
 
       const envelope: OutputEnvelope<UpdateResultUpToDate> = {
@@ -240,7 +255,7 @@ async function runUpdateCommand(
         results: [result],
         count: 1,
         source: {
-          forkcast_commit: new_commit,
+          forkcast_commit: newCommit,
           last_updated: fetchResult.meta.last_updated,
         },
         warning: "Force-fetch returned existing cache (possible rate limit); no new data available.",
@@ -248,7 +263,7 @@ async function runUpdateCommand(
 
       if (options.pretty) {
         deps.stdout.write(
-          `Already up to date (force). Commit: ${result.commit}\nLast updated: ${result.last_updated}\n`,
+          `Already up to date (force). Commit: ${result.commit}\nLast updated: ${result.lastUpdated}\n`,
         );
         return;
       }
@@ -259,10 +274,10 @@ async function runUpdateCommand(
 
     const result: UpdateResultUpdated = {
       status: "updated",
-      old_commit,
-      new_commit,
-      eips_count: buildResult.eipCount,
-      meetings_count: buildResult.meetingCount,
+      oldCommit,
+      newCommit,
+      eipsCount: buildResult.eipCount,
+      meetingsCount: buildResult.meetingCount,
     };
 
     const envelope: OutputEnvelope<UpdateResultUpdated> = {
@@ -277,8 +292,8 @@ async function runUpdateCommand(
 
     if (options.pretty) {
       deps.stdout.write(
-        `Updated: ${result.old_commit ?? "(none)"} → ${result.new_commit}\n`
-        + `EIPs: ${result.eips_count}, meetings: ${result.meetings_count}\n`,
+        `Updated: ${result.oldCommit ?? "(none)"} → ${result.newCommit}\n`
+        + `EIPs: ${result.eipsCount}, meetings: ${result.meetingsCount}\n`,
       );
       return;
     }
@@ -314,7 +329,7 @@ async function runUpdateCommand(
     const result: UpdateResultUpToDate = {
       status: "up_to_date",
       commit: existingMeta.forkcast_commit,
-      last_updated: existingMeta.last_updated,
+      lastUpdated: existingMeta.last_updated,
     };
 
     const envelope: OutputEnvelope<UpdateResultUpToDate> = {
@@ -329,7 +344,7 @@ async function runUpdateCommand(
 
     if (options.pretty) {
       deps.stdout.write(
-        `Already up to date. Commit: ${result.commit}\nLast updated: ${result.last_updated}\n`,
+        `Already up to date. Commit: ${result.commit}\nLast updated: ${result.lastUpdated}\n`,
       );
       return;
     }
@@ -354,10 +369,10 @@ async function runUpdateCommand(
 
   const result: UpdateResultUpdated = {
     status: "updated",
-    old_commit: existingMeta?.forkcast_commit ?? null,
-    new_commit: fetchResult.meta.forkcast_commit,
-    eips_count: buildResult.eipCount,
-    meetings_count: buildResult.meetingCount,
+    oldCommit: existingMeta?.forkcast_commit ?? null,
+    newCommit: fetchResult.meta.forkcast_commit,
+    eipsCount: buildResult.eipCount,
+    meetingsCount: buildResult.meetingCount,
   };
 
   const envelope: OutputEnvelope<UpdateResultUpdated> = {
@@ -372,8 +387,8 @@ async function runUpdateCommand(
 
   if (options.pretty) {
     deps.stdout.write(
-      `Updated: ${result.old_commit ?? "(none)"} → ${result.new_commit}\n`
-      + `EIPs: ${result.eips_count}, meetings: ${result.meetings_count}\n`,
+      `Updated: ${result.oldCommit ?? "(none)"} → ${result.newCommit}\n`
+      + `EIPs: ${result.eipsCount}, meetings: ${result.meetingsCount}\n`,
     );
     return;
   }
