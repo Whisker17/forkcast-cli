@@ -1,6 +1,7 @@
 import { Command } from "commander";
 import { eipCommand } from "./commands/eip.js";
 import { eipsCommand } from "./commands/eips.js";
+import { forksCommand } from "./commands/forks.js";
 import { meetingsCommand } from "./commands/meetings.js";
 import { VERSION } from "./generated/version.js";
 
@@ -18,6 +19,7 @@ program
 program.option("--pretty", "Human-readable output instead of JSON");
 program.addCommand(eipCommand);
 program.addCommand(eipsCommand);
+program.addCommand(forksCommand);
 program.addCommand(meetingsCommand);
 
 await program.parseAsync();
