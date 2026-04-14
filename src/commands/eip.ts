@@ -3,12 +3,12 @@ import path from "node:path";
 import { Command } from "commander";
 import { loadCache, warnIfStale } from "../lib/cache.js";
 import { getCacheLayout, getCacheRoot, type WritableLike } from "../lib/fetcher.js";
+import { CommandError, getCommandErrorCode } from "../lib/errors.js";
 import { exitCodeForErrorCode, writeJsonEnvelope, writeJsonError, writePrettyError } from "../lib/output.js";
 import type {
   CacheMeta,
   ContextEntry,
   Eip,
-  ErrorCode,
   OutputEip,
   OutputEnvelope,
   OutputForkChampion,
@@ -18,24 +18,6 @@ import type {
   OutputSource,
   PresentationHistoryEntry,
 } from "../types/index.js";
-
-class EipCommandError extends Error {
-  code: ErrorCode;
-
-  constructor(message: string, code: ErrorCode, options?: ErrorOptions) {
-    super(message, options);
-    this.name = "EipCommandError";
-    this.code = code;
-  }
-}
-
-const ERROR_CODES = new Set<ErrorCode>([
-  "NOT_CACHED",
-  "EIP_NOT_FOUND",
-  "FETCH_FAILED",
-  "DATA_ERROR",
-  "INVALID_INPUT",
-]);
 
 export interface EipCommandDependencies {
   getCacheRoot: () => string;
@@ -57,12 +39,12 @@ function getDefaultDependencies(): EipCommandDependencies {
 
 function parseEipNumber(value: string) {
   if (!/^\d+$/.test(value)) {
-    throw new EipCommandError("Invalid EIP number", "INVALID_INPUT");
+    throw new CommandError("Invalid EIP number", "INVALID_INPUT");
   }
 
   const parsed = Number(value);
   if (!Number.isSafeInteger(parsed) || parsed <= 0) {
-    throw new EipCommandError("Invalid EIP number", "INVALID_INPUT");
+    throw new CommandError("Invalid EIP number", "INVALID_INPUT");
   }
 
   return parsed;
@@ -143,14 +125,14 @@ async function readCachedEip(
     return normalizeEipForOutput(JSON.parse(await deps.readFile(eipPath, "utf8")) as Eip);
   } catch (error) {
     if (error && typeof error === "object" && "code" in error && error.code === "ENOENT") {
-      throw new EipCommandError(`EIP ${eipId} not found`, "EIP_NOT_FOUND", { cause: error });
+      throw new CommandError(`EIP ${eipId} not found`, "EIP_NOT_FOUND", { cause: error });
     }
 
     if (error instanceof SyntaxError) {
-      throw new EipCommandError(`EIP ${eipId} contains invalid JSON`, "DATA_ERROR", { cause: error });
+      throw new CommandError(`EIP ${eipId} contains invalid JSON`, "DATA_ERROR", { cause: error });
     }
 
-    throw new EipCommandError(
+    throw new CommandError(
       `Failed to read cached EIP ${eipId}: ${error instanceof Error ? error.message : String(error)}`,
       "DATA_ERROR",
       { cause: error },
@@ -297,7 +279,7 @@ async function runEipCommand(
     // EIP_NOT_FOUND.
     if (
       usedLightPath
-      && error instanceof EipCommandError
+      && error instanceof CommandError
       && error.code === "EIP_NOT_FOUND"
     ) {
       const loaded = await deps.loadCache({ cacheRoot, stderr: deps.stderr });
@@ -331,17 +313,6 @@ async function runEipCommand(
   }
 
   writeJsonEnvelope(envelope, deps.stdout);
-}
-
-function getCommandErrorCode(error: unknown): ErrorCode {
-  if (error && typeof error === "object" && "code" in error) {
-    const code = (error as { code?: unknown }).code;
-    if (typeof code === "string" && ERROR_CODES.has(code as ErrorCode)) {
-      return code as ErrorCode;
-    }
-  }
-
-  return "DATA_ERROR";
 }
 
 async function handleEipCommand(
