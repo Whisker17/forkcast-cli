@@ -165,6 +165,10 @@ function formatPrettyForks(results: ForkResult[]): string {
     "Declined".length,
     ...results.map((r) => String(r.eipsByInclusion.Declined).length),
   );
+  const withdrawnWidth = Math.max(
+    "Withdrawn".length,
+    ...results.map((r) => String(r.eipsByInclusion.Withdrawn).length),
+  );
 
   const lines: string[] = [
     [
@@ -177,6 +181,7 @@ function formatPrettyForks(results: ForkResult[]): string {
       "Scheduled".padStart(scheduledWidth),
       "Included".padStart(includedWidth),
       "Declined".padStart(declinedWidth),
+      "Withdrawn".padStart(withdrawnWidth),
     ].join("  "),
   ];
 
@@ -192,6 +197,7 @@ function formatPrettyForks(results: ForkResult[]): string {
       String(result.eipsByInclusion.Scheduled).padStart(scheduledWidth),
       String(result.eipsByInclusion.Included).padStart(includedWidth),
       String(result.eipsByInclusion.Declined).padStart(declinedWidth),
+      String(result.eipsByInclusion.Withdrawn).padStart(withdrawnWidth),
     ].join("  "));
   }
 
