@@ -7,6 +7,7 @@ import { forksCommand } from "./commands/forks.js";
 import { meetingsCommand } from "./commands/meetings.js";
 import { searchCommand } from "./commands/search.js";
 import { timelineCommand } from "./commands/timeline.js";
+import { changesCommand } from "./commands/changes.js";
 import { updateCommand } from "./commands/update.js";
 import { VERSION } from "./generated/version.js";
 
@@ -29,6 +30,7 @@ program.addCommand(meetingsCommand);
 program.addCommand(searchCommand);
 program.addCommand(decisionsCommand);
 program.addCommand(timelineCommand);
+program.addCommand(changesCommand);
 program.addCommand(diffCommand);
 program.addCommand(updateCommand);
 
