@@ -317,3 +317,40 @@ export interface EipDiffEntry {
   /** True if the EIP was removed from the fork between the two dates. */
   removed: boolean;
 }
+
+// ---------------------------------------------------------------------------
+// Stage-change types (WHI-70)
+// ---------------------------------------------------------------------------
+
+/**
+ * One entry from the `eips` array of
+ * https://ethereum.github.io/forkcast/api/eip-stage-changes.json
+ *
+ * Only the fields needed by the `changes` command are modelled; the raw API
+ * response may include additional fields that are intentionally ignored.
+ */
+export interface StageChange {
+  id: number;
+  title: string;
+  /** EIP prefix, e.g. "EIP" */
+  prefix: string;
+  /** EIP lifecycle status, e.g. "Draft" */
+  status: string;
+  description: string;
+  /** ISO date string (YYYY-MM-DD) of the most recent fork-stage change */
+  lastStageChange: string;
+  /** Fork name in which the most recent stage change occurred */
+  lastStageChangeFork: string;
+  /** Current fork-inclusion stage, e.g. "Considered", "Declined" */
+  currentStage: string;
+  /** Relative URL on the forkcast site, e.g. "/eips/7805" */
+  url: string;
+}
+
+/**
+ * Top-level shape of eip-stage-changes.json.
+ */
+export interface StageChangesApiResponse {
+  generatedAt: string;
+  eips: StageChange[];
+}
