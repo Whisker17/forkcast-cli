@@ -169,13 +169,14 @@ async function ensureFetchResultMetadata(
   }
 }
 
-function parseMeetingRef(type: string, dirName: string): MeetingRef {
+function parseMeetingRef(type: string, dirName: string): MeetingRef | null {
   const match = /^(?<date>\d{4}-\d{2}-\d{2})_(?<number>\d+)$/.exec(dirName);
   if (!match?.groups) {
-    throw new CacheError(
-      `Meeting directory "${type}/${dirName}" does not match the expected {date}_{number} pattern`,
-      "DATA_ERROR",
+    // Non-standard directories (e.g. "acdc/plan") are skipped gracefully.
+    process.stderr.write(
+      `Meeting directory "${type}/${dirName}" does not match the expected {date}_{number} pattern\n`,
     );
+    return null;
   }
 
   return {
@@ -222,7 +223,9 @@ async function readMeetingManifest(paths: CachePaths): Promise<MeetingRef[]> {
     "meetings-manifest.json",
   );
 
-  return manifest.map((entry) => parseMeetingRef(entry.type, entry.dirName));
+  return manifest
+    .map((entry) => parseMeetingRef(entry.type, entry.dirName))
+    .filter((ref): ref is MeetingRef => ref !== null);
 }
 
 async function loadCachedTldrs(paths: CachePaths): Promise<CachedTldrEntry[]> {
@@ -230,14 +233,18 @@ async function loadCachedTldrs(paths: CachePaths): Promise<CachedTldrEntry[]> {
   // Filter out _key_decisions.json files — they are not TLDRs and would fail
   // parseMeetingRef() because their dirName includes the "_key_decisions" suffix.
   const tldrPaths = filePaths.filter((p) => !p.endsWith("_key_decisions.json"));
-  return Promise.all(tldrPaths.map(async (filePath) => {
+  const results: CachedTldrEntry[] = [];
+  await Promise.all(tldrPaths.map(async (filePath) => {
     const dirName = path.basename(filePath, ".json");
     const type = path.basename(path.dirname(filePath));
-    return {
-      ref: parseMeetingRef(type, dirName),
+    const ref = parseMeetingRef(type, dirName);
+    if (!ref) return; // skip non-standard directories
+    results.push({
+      ref,
       tldr: await readJsonFile<MeetingTldr>(filePath, `TLDR ${type}/${dirName}.json`),
-    };
+    });
   }));
+  return results;
 }
 
 // getTldrTextFields and getMeetingTargetText are imported from tldr-utils.ts
