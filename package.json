@@ -1,0 +1,38 @@
+{
+  "name": "forkcast-cli",
+  "version": "0.1.0",
+  "description": "CLI for querying Ethereum governance data from forkcast",
+  "type": "module",
+  "main": "dist/index.js",
+  "bin": {
+    "forkcast": "bin/forkcast"
+  },
+  "scripts": {
+    "prebuild": "node scripts/stamp-version.mjs",
+    "build": "tsc -p tsconfig.json",
+    "test:types": "tsc --noEmit -p tsconfig.typecheck.json",
+    "dev": "node scripts/stamp-version.mjs && tsc --watch -p tsconfig.json",
+    "start": "node dist/index.js",
+    "test": "node --test test/*.test.mjs"
+  },
+  "keywords": [
+    "cli",
+    "ethereum",
+    "forkcast"
+  ],
+  "author": "",
+  "license": "ISC",
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "better-sqlite3": "^12.9.0",
+    "commander": "^14.0.3",
+    "tar": "^7.5.13"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.13",
+    "@types/node": "^25.6.0",
+    "typescript": "^5.9.3"
+  }
+}

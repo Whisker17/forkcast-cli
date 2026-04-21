@@ -137,7 +137,8 @@ src/
 
 - **Node.js version:** >= 20
 - **Module system:** ESM (`"type": "module"`, tsconfig target `ES2022`, module `Node16`)
-- **Runtime dependencies:** `commander` only. Everything else uses Node built-ins (`node:fs`, `node:path`, `node:https`, `node:zlib`)
+- **Runtime dependencies:** `commander`, `tar`, `better-sqlite3`. Everything else uses Node built-ins (`node:fs`, `node:path`, `node:https`, `node:zlib`)
+- **Native modules:** `better-sqlite3` compiles a native C++ addon via `node-gyp` at `npm install` time. Requires a C/C++ toolchain (Xcode CLT on macOS, `build-essential` on Debian/Ubuntu, MSVC on Windows) and Python 3. Prebuild binaries are fetched when available, but the toolchain is needed as a fallback.
 - **Cache directory:** `FORKCAST_CACHE` env var or `~/.forkcast/`
 - **Commit messages:** reference Linear issues: `feat(WHI-58): implement data fetcher`
 
